@@ -26,7 +26,9 @@ os.environ.setdefault("MPLCONFIGDIR", str(MPL_CONFIG_DIR))
 LANDMARK_MATCH_THRESHOLD = 0.09
 APPEARANCE_MATCH_THRESHOLD = 0.78
 COMBINED_MATCH_THRESHOLD = 0.65
+MIN_ACCEPTED_REFERENCE_IMAGES = 2
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png"}
+FACE_SCAN_WINDOW = "distinguish"
 
 
 @dataclass
@@ -111,7 +113,7 @@ def capture_face_image() -> tuple[Path | None, str]:
                 (0, 255, 0),
                 2,
             )
-            cv2.imshow("掃描會員", frame)
+            cv2.imshow(FACE_SCAN_WINDOW, frame)
             key = cv2.waitKey(1) & 0xFF
             if key == 27:
                 return None, "使用者取消掃描。"
@@ -298,9 +300,11 @@ def recognize_from_image(image_path: Path) -> FaceRecognitionResult:
     best_combined_distance = float("inf")
     best_landmark_distance = float("inf")
     best_appearance_distance = float("inf")
+    best_accepted_count = 0
     checked_images = 0
 
     for member in read_members():
+        accepted_distances: list[tuple[float, float, float, str]] = []
         for face_image in _member_face_images(member):
             reference_feature, _ = extract_face_feature(face_image)
             if reference_feature is None:
@@ -315,18 +319,45 @@ def recognize_from_image(image_path: Path) -> FaceRecognitionResult:
                 reference_feature.appearance,
             )
             combined_distance = (landmark_distance * 0.2) + (appearance_distance * 0.8)
-            if combined_distance < best_combined_distance:
+            if (
+                landmark_distance <= LANDMARK_MATCH_THRESHOLD
+                and appearance_distance <= APPEARANCE_MATCH_THRESHOLD
+                and combined_distance <= COMBINED_MATCH_THRESHOLD
+            ):
+                accepted_distances.append(
+                    (combined_distance, landmark_distance, appearance_distance, str(face_image))
+                )
+
+            if combined_distance < best_combined_distance and not best_member:
                 best_combined_distance = combined_distance
                 best_landmark_distance = landmark_distance
                 best_appearance_distance = appearance_distance
+                best_accepted_count = len(accepted_distances)
                 best_member = member
                 best_image = str(face_image)
+
+        if len(accepted_distances) < MIN_ACCEPTED_REFERENCE_IMAGES:
+            continue
+
+        accepted_distances.sort(key=lambda item: item[0])
+        strongest_matches = accepted_distances[:MIN_ACCEPTED_REFERENCE_IMAGES]
+        member_combined_distance = sum(item[0] for item in strongest_matches) / len(strongest_matches)
+        member_landmark_distance = sum(item[1] for item in strongest_matches) / len(strongest_matches)
+        member_appearance_distance = sum(item[2] for item in strongest_matches) / len(strongest_matches)
+        if member_combined_distance < best_combined_distance or best_accepted_count < MIN_ACCEPTED_REFERENCE_IMAGES:
+            best_combined_distance = member_combined_distance
+            best_landmark_distance = member_landmark_distance
+            best_appearance_distance = member_appearance_distance
+            best_accepted_count = len(accepted_distances)
+            best_member = member
+            best_image = strongest_matches[0][3]
 
     if checked_images == 0:
         return FaceRecognitionResult(False, message="沒有可用的會員臉部 landmark 照片。")
 
     if (
         best_member is None
+        or best_accepted_count < MIN_ACCEPTED_REFERENCE_IMAGES
         or best_landmark_distance > LANDMARK_MATCH_THRESHOLD
         or best_appearance_distance > APPEARANCE_MATCH_THRESHOLD
         or best_combined_distance > COMBINED_MATCH_THRESHOLD
@@ -336,6 +367,7 @@ def recognize_from_image(image_path: Path) -> FaceRecognitionResult:
             identity_path=best_image,
             message=(
                 "查無會員資料。"
+                f"通過照片數: {best_accepted_count}, "
                 f"landmark: {best_landmark_distance:.3f}, "
                 f"appearance: {best_appearance_distance:.3f}, "
                 f"combined: {best_combined_distance:.3f}"
@@ -348,6 +380,7 @@ def recognize_from_image(image_path: Path) -> FaceRecognitionResult:
         identity_path=best_image,
         message=(
             "會員辨識成功，"
+            f"通過照片數: {best_accepted_count}, "
             f"landmark: {best_landmark_distance:.3f}, "
             f"appearance: {best_appearance_distance:.3f}, "
             f"combined: {best_combined_distance:.3f}"
