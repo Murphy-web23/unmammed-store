@@ -23,7 +23,9 @@ MPL_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
 MEDIAPIPE_DIR.mkdir(parents=True, exist_ok=True)
 os.environ.setdefault("MPLCONFIGDIR", str(MPL_CONFIG_DIR))
 
-LANDMARK_MATCH_THRESHOLD = 0.085
+LANDMARK_MATCH_THRESHOLD = 0.09
+APPEARANCE_MATCH_THRESHOLD = 0.78
+COMBINED_MATCH_THRESHOLD = 0.65
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png"}
 
 
@@ -33,6 +35,12 @@ class FaceRecognitionResult:
     member: Member | None = None
     identity_path: str = ""
     message: str = ""
+
+
+@dataclass
+class FaceFeature:
+    landmarks: list[float]
+    appearance: list[float]
 
 
 def _safe_mirror_frame(cv2: Any, frame: Any) -> Any:
@@ -157,7 +165,52 @@ def _landmark_distance(left: list[float], right: list[float]) -> float:
     return math.sqrt(sum((a - b) ** 2 for a, b in zip(left, right)) / len(left))
 
 
-def extract_landmark_vector(image_path: Path) -> tuple[list[float] | None, str]:
+def _crop_face_by_landmarks(image: Any, landmarks: list[Any]) -> Any | None:
+    height, width = image.shape[:2]
+    xs = [float(point.x) * width for point in landmarks]
+    ys = [float(point.y) * height for point in landmarks]
+    min_x, max_x = max(0, min(xs)), min(width - 1, max(xs))
+    min_y, max_y = max(0, min(ys)), min(height - 1, max(ys))
+
+    face_width = max_x - min_x
+    face_height = max_y - min_y
+    if face_width <= 0 or face_height <= 0:
+        return None
+
+    pad_x = face_width * 0.18
+    pad_y = face_height * 0.18
+    left = max(0, int(min_x - pad_x))
+    right = min(width, int(max_x + pad_x))
+    top = max(0, int(min_y - pad_y))
+    bottom = min(height, int(max_y + pad_y))
+    if right <= left or bottom <= top:
+        return None
+    return image[top:bottom, left:right]
+
+
+def _extract_appearance_vector(cv2: Any, face_image: Any) -> list[float] | None:
+    try:
+        import numpy as np  # type: ignore
+    except Exception:
+        return None
+
+    gray = cv2.cvtColor(face_image, cv2.COLOR_BGR2GRAY)
+    gray = cv2.resize(gray, (64, 64))
+    gray = cv2.equalizeHist(gray).astype("float32") / 255.0
+    gray = (gray - float(gray.mean())) / (float(gray.std()) + 1e-6)
+    return gray.flatten().tolist()
+
+
+def _appearance_distance(left: list[float], right: list[float]) -> float:
+    if len(left) != len(right):
+        return float("inf")
+    dot = sum(a * b for a, b in zip(left, right))
+    left_norm = math.sqrt(sum(a * a for a in left))
+    right_norm = math.sqrt(sum(b * b for b in right))
+    return 1.0 - (dot / ((left_norm * right_norm) + 1e-8))
+
+
+def extract_face_feature(image_path: Path) -> tuple[FaceFeature | None, str]:
     cv2, cv2_error = _load_cv2()
     if cv2_error:
         return None, cv2_error
@@ -193,10 +246,27 @@ def extract_landmark_vector(image_path: Path) -> tuple[list[float] | None, str]:
     if not result.face_landmarks:
         return None, f"沒有偵測到臉部 landmarks: {image_path.name}"
 
-    vector = _normalize_landmarks(result.face_landmarks[0])
-    if vector is None:
+    landmarks = result.face_landmarks[0]
+    landmark_vector = _normalize_landmarks(landmarks)
+    if landmark_vector is None:
         return None, f"臉部 landmarks 正規化失敗: {image_path.name}"
-    return vector, "landmarks 擷取成功"
+
+    face_crop = _crop_face_by_landmarks(image, landmarks)
+    if face_crop is None:
+        return None, f"臉部裁切失敗: {image_path.name}"
+
+    appearance = _extract_appearance_vector(cv2, face_crop)
+    if appearance is None:
+        return None, f"臉部影像特徵擷取失敗: {image_path.name}"
+
+    return FaceFeature(landmarks=landmark_vector, appearance=appearance), "landmark + appearance 擷取成功"
+
+
+def extract_landmark_vector(image_path: Path) -> tuple[list[float] | None, str]:
+    feature, message = extract_face_feature(image_path)
+    if feature is None:
+        return None, message
+    return feature.landmarks, message
 
 
 def _member_face_images(member: Member) -> list[Path]:
@@ -218,46 +288,70 @@ def recognize_from_image(image_path: Path) -> FaceRecognitionResult:
     if not FACE_ROOT.exists():
         return FaceRecognitionResult(False, message="src/face/ 不存在，無法辨識會員。")
 
-    query_vector, error = extract_landmark_vector(image_path)
-    if query_vector is None:
+    query_feature, error = extract_face_feature(image_path)
+    if query_feature is None:
         return FaceRecognitionResult(False, message=error)
 
-    query_vectors = [query_vector, _mirror_landmark_vector(query_vector)]
+    query_landmarks = [query_feature.landmarks, _mirror_landmark_vector(query_feature.landmarks)]
     best_member: Member | None = None
     best_image = ""
-    best_distance = float("inf")
+    best_combined_distance = float("inf")
+    best_landmark_distance = float("inf")
+    best_appearance_distance = float("inf")
     checked_images = 0
 
     for member in read_members():
         for face_image in _member_face_images(member):
-            reference_vector, _ = extract_landmark_vector(face_image)
-            if reference_vector is None:
+            reference_feature, _ = extract_face_feature(face_image)
+            if reference_feature is None:
                 continue
             checked_images += 1
-            distance = min(
-                _landmark_distance(candidate, reference_vector)
-                for candidate in query_vectors
+            landmark_distance = min(
+                _landmark_distance(candidate, reference_feature.landmarks)
+                for candidate in query_landmarks
             )
-            if distance < best_distance:
-                best_distance = distance
+            appearance_distance = _appearance_distance(
+                query_feature.appearance,
+                reference_feature.appearance,
+            )
+            combined_distance = (landmark_distance * 0.2) + (appearance_distance * 0.8)
+            if combined_distance < best_combined_distance:
+                best_combined_distance = combined_distance
+                best_landmark_distance = landmark_distance
+                best_appearance_distance = appearance_distance
                 best_member = member
                 best_image = str(face_image)
 
     if checked_images == 0:
         return FaceRecognitionResult(False, message="沒有可用的會員臉部 landmark 照片。")
 
-    if best_member is None or best_distance > LANDMARK_MATCH_THRESHOLD:
+    if (
+        best_member is None
+        or best_landmark_distance > LANDMARK_MATCH_THRESHOLD
+        or best_appearance_distance > APPEARANCE_MATCH_THRESHOLD
+        or best_combined_distance > COMBINED_MATCH_THRESHOLD
+    ):
         return FaceRecognitionResult(
             False,
             identity_path=best_image,
-            message=f"查無會員資料。最接近距離: {best_distance:.3f}",
+            message=(
+                "查無會員資料。"
+                f"landmark: {best_landmark_distance:.3f}, "
+                f"appearance: {best_appearance_distance:.3f}, "
+                f"combined: {best_combined_distance:.3f}"
+            ),
         )
 
     return FaceRecognitionResult(
         True,
         member=best_member,
         identity_path=best_image,
-        message=f"會員辨識成功，landmark 距離: {best_distance:.3f}",
+        message=(
+            "會員辨識成功，"
+            f"landmark: {best_landmark_distance:.3f}, "
+            f"appearance: {best_appearance_distance:.3f}, "
+            f"combined: {best_combined_distance:.3f}"
+        ),
     )
 
 
