@@ -1,5 +1,7 @@
 product_id,name,price,class_name
-P001,可樂,30,coke
-P002,餅乾,25,cookie
-P003,泡麵,45,noodle
-P004,水,20,water
+P001,Asahi 啤酒,49,asahi
+P002,Owala 水壺,899,owala
+P003,藍色原子筆,15,pen_blue
+P004,Tiffany 色原子筆,15,pen_tiffany
+P005,綠色雨傘,199,umbrella_green
+P006,Tiffany 色雨傘,199,umbrella_tiffany

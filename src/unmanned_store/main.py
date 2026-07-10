@@ -10,7 +10,7 @@ if __package__ is None or __package__ == "":
 
 from unmanned_store.utils.checkout import Cart
 from unmanned_store.utils.face_recognizer import scan_member
-from unmanned_store.utils.item_detector import find_model_path, scan_item
+from unmanned_store.utils.item_detector import ITEM_ROOT, find_item_reference_root, scan_item
 from unmanned_store.utils.member_manager import (
     FACE_ROOT,
     MEMBERS_CSV,
@@ -118,7 +118,7 @@ class UnmannedStoreApp(tk.Tk):
             ("測試加入商品", self.test_add_product),
             ("檢查資料庫", self.check_database),
             ("測試 Landmark 單次辨識", self.test_landmark_once),
-            ("測試 YOLO 單次辨識", self.test_yolo_once),
+            ("測試 OpenCV 單次辨識", self.test_opencv_item_once),
             ("重置現場會員", self.reset_demo_member_data),
         ]
         for index, (text, command) in enumerate(test_buttons):
@@ -189,7 +189,7 @@ class UnmannedStoreApp(tk.Tk):
         if not product:
             messagebox.showwarning(
                 "商品尚未建檔",
-                f"YOLO 回傳 class_name: {result.class_name}\n此商品尚未建檔。",
+                f"OpenCV 回傳 class_name: {result.class_name}\n此商品尚未建檔。",
             )
             return
 
@@ -252,13 +252,25 @@ class UnmannedStoreApp(tk.Tk):
                 image_count = len(list(folder.glob("*.jpg"))) + len(list(folder.glob("*.png")))
             lines.append(f"- {member.member_id} {member.name}: {folder} / {image_count} 張")
 
-        model_primary = PROJECT_ROOT / "model" / "best.pt"
-        model_backup = PROJECT_ROOT / "model" / "runs" / "classify" / "train" / "weights" / "best.pt"
+        item_lines = []
+        if ITEM_ROOT.exists():
+            for folder in sorted(ITEM_ROOT.iterdir()):
+                if folder.is_dir():
+                    count = (
+                        len(list(folder.glob("*.jpg")))
+                        + len(list(folder.glob("*.jpeg")))
+                        + len(list(folder.glob("*.png")))
+                        + len(list(folder.glob("*.JPG")))
+                        + len(list(folder.glob("*.JPEG")))
+                        + len(list(folder.glob("*.PNG")))
+                    )
+                    item_lines.append(f"- {folder.name}: {count} 張")
         lines.extend(
             [
                 "",
-                f"model/best.pt: {'存在' if model_primary.resolve().exists() else '不存在'}",
-                f"model/runs/classify/train/weights/best.pt: {'存在' if model_backup.resolve().exists() else '不存在'}",
+                f"src/item/: {'存在' if ITEM_ROOT.exists() else '不存在'}",
+                "商品參考照片:",
+                *(item_lines or ["沒有商品參考照片"]),
                 "",
                 "products.csv class_name:",
                 ", ".join(list_class_names()) or "沒有商品 class_name",
@@ -283,20 +295,20 @@ class UnmannedStoreApp(tk.Tk):
         else:
             messagebox.showwarning("Landmark 單次辨識", f"辨識失敗\n原因: {result.message}")
 
-    def test_yolo_once(self) -> None:
+    def test_opencv_item_once(self) -> None:
         result = scan_item()
         if not result.success:
-            messagebox.showwarning("YOLO 單次辨識", result.message)
+            messagebox.showwarning("OpenCV 單次辨識", result.message)
             return
         product = get_product_by_class(result.class_name)
         if product:
             messagebox.showinfo(
-                "YOLO 單次辨識",
+                "OpenCV 單次辨識",
                 f"class_name: {result.class_name}\nconfidence: {result.confidence:.2f}\n對應商品: {product.name} / {product.price} 元",
             )
         else:
             messagebox.showwarning(
-                "YOLO 單次辨識",
+                "OpenCV 單次辨識",
                 f"class_name: {result.class_name}\nconfidence: {result.confidence:.2f}\n此 class_name 尚未建檔",
             )
 
@@ -316,10 +328,9 @@ class UnmannedStoreApp(tk.Tk):
 
 
 def main() -> None:
-    model_path = find_model_path()
     app = UnmannedStoreApp()
-    if model_path is None:
-        app.status_var.set("尚未掃描會員；提醒: 找不到 YOLO 模型，掃描商品可先用測試加入商品備援")
+    if find_item_reference_root() is None:
+        app.status_var.set("尚未掃描會員；提醒: 找不到 src/item 商品參考照片，掃描商品可先用測試加入商品備援")
     app.mainloop()
 
 

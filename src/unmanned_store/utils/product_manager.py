@@ -9,10 +9,12 @@ PROJECT_ROOT = Path(__file__).resolve().parents[3]
 PRODUCTS_CSV = PROJECT_ROOT / "src" / "unmanned_store" / "data" / "products.csv"
 
 DEFAULT_PRODUCTS = [
-    {"product_id": "P001", "name": "可樂", "price": "30", "class_name": "coke"},
-    {"product_id": "P002", "name": "餅乾", "price": "25", "class_name": "cookie"},
-    {"product_id": "P003", "name": "泡麵", "price": "45", "class_name": "noodle"},
-    {"product_id": "P004", "name": "水", "price": "20", "class_name": "water"},
+    {"product_id": "P001", "name": "Asahi 啤酒", "price": "49", "class_name": "asahi"},
+    {"product_id": "P002", "name": "Owala 水壺", "price": "899", "class_name": "owala"},
+    {"product_id": "P003", "name": "藍色原子筆", "price": "15", "class_name": "pen_blue"},
+    {"product_id": "P004", "name": "Tiffany 色原子筆", "price": "15", "class_name": "pen_tiffany"},
+    {"product_id": "P005", "name": "綠色雨傘", "price": "199", "class_name": "umbrella_green"},
+    {"product_id": "P006", "name": "Tiffany 色雨傘", "price": "199", "class_name": "umbrella_tiffany"},
 ]
 
 
