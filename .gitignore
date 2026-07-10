@@ -1,0 +1,11 @@
+model/
+.venv/
+__pycache__/
+*.pyc
+.DS_Store
+src/face/*
+!src/face/.gitkeep
+src/unmanned_store/temp/
+src/unmanned_store/captures/
+*.mp4
+*.avi
