@@ -15,13 +15,14 @@ MPL_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
 os.environ.setdefault("MPLCONFIGDIR", str(MPL_CONFIG_DIR))
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png"}
-OPENCV_MATCH_THRESHOLD = 0.50
+OPENCV_MATCH_THRESHOLD = 0.4
 OPENCV_MIN_MARGIN = 0.06
 OPENCV_TOP_MATCHES = 3
-COLOR_WEIGHT = 0.28
+COLOR_WEIGHT = 0.3
 EDGE_WEIGHT = 0.22
-APPEARANCE_WEIGHT = 0.24
-ORB_WEIGHT = 0.26
+SHAPE_WEIGHT = 0.18
+APPEARANCE_WEIGHT = 0.2
+ORB_WEIGHT = 0.1
 ITEM_SCAN_WINDOW = "item_scan"
 
 
@@ -40,6 +41,8 @@ class ItemFeature:
     image_path: Path
     color_hist: Any
     edge_vector: Any
+    shape_vector: Any
+    shape_label: str
     appearance_vector: Any
     descriptors: Any
 
@@ -49,6 +52,7 @@ class MatchScore:
     total: float
     color: float
     edge: float
+    shape: float
     appearance: float
     orb: float
 
@@ -93,7 +97,7 @@ def _center_crop(image: Any, ratio: float = 0.9) -> Any:
     return image[top : top + crop_height, left : left + crop_width]
 
 
-def _foreground_crop(cv2: Any, image: Any) -> Any:
+def _foreground_mask(cv2: Any, image: Any) -> Any:
     hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
     saturation = hsv[:, :, 1]
     value = hsv[:, :, 2]
@@ -103,6 +107,11 @@ def _foreground_crop(cv2: Any, image: Any) -> Any:
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
     mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=2)
     mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=1)
+    return mask
+
+
+def _foreground_crop(cv2: Any, image: Any) -> Any:
+    mask = _foreground_mask(cv2, image)
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     if not contours:
         return _center_crop(image)
@@ -174,6 +183,86 @@ def _extract_edge_vector(cv2: Any, image: Any) -> Any:
     return vector if norm == 0.0 else vector / norm
 
 
+def _extract_shape_features(cv2: Any, image: Any) -> tuple[Any, str]:
+    import math
+    import numpy as np
+
+    prepared = _prepared_image(cv2, image, max_size=520)
+    resized = cv2.resize(prepared, (240, 240))
+    mask = _foreground_mask(cv2, resized)
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        return np.zeros(9, dtype=np.float32), "形狀不明"
+
+    contour = max(contours, key=cv2.contourArea)
+    area = float(cv2.contourArea(contour))
+    perimeter = float(cv2.arcLength(contour, True))
+    if area <= 1.0 or perimeter <= 1.0:
+        return np.zeros(9, dtype=np.float32), "形狀不明"
+
+    x, y, width, height = cv2.boundingRect(contour)
+    box_area = float(max(1, width * height))
+    long_side = float(max(width, height))
+    short_side = float(max(1, min(width, height)))
+    aspect_ratio = min(1.0, long_side / short_side / 8.0)
+    extent = min(1.0, area / box_area)
+
+    hull = cv2.convexHull(contour)
+    hull_area = float(cv2.contourArea(hull))
+    solidity = min(1.0, area / hull_area) if hull_area > 1.0 else 0.0
+    circularity = min(1.0, (4.0 * math.pi * area) / (perimeter * perimeter))
+
+    epsilon = 0.035 * perimeter
+    approx = cv2.approxPolyDP(contour, epsilon, True)
+    vertices = len(approx)
+    corner_score = max(0.0, min(1.0, vertices / 10.0))
+    rectangle_score = max(0.0, 1.0 - abs(vertices - 4) / 6.0) * extent
+
+    moments = cv2.moments(contour)
+    if moments["m00"] == 0:
+        pointiness = 0.0
+    else:
+        center_x = moments["m10"] / moments["m00"]
+        center_y = moments["m01"] / moments["m00"]
+        points = contour.reshape(-1, 2).astype(np.float32)
+        distances = np.sqrt(((points[:, 0] - center_x) ** 2) + ((points[:, 1] - center_y) ** 2))
+        mean_distance = float(distances.mean()) if len(distances) else 0.0
+        max_distance = float(distances.max()) if len(distances) else 0.0
+        pointiness = max(0.0, min(1.0, (max_distance - mean_distance) / max(mean_distance, 1.0)))
+
+    long_score = max(0.0, min(1.0, (long_side / short_side - 1.0) / 5.0))
+    square_score = max(0.0, 1.0 - abs(width - height) / max(width, height, 1)) * rectangle_score
+
+    vector = np.array(
+        [
+            aspect_ratio,
+            extent,
+            solidity,
+            circularity,
+            corner_score,
+            rectangle_score,
+            pointiness,
+            long_score,
+            square_score,
+        ],
+        dtype=np.float32,
+    )
+    norm = float(np.linalg.norm(vector))
+
+    labels = []
+    if long_score >= 0.42:
+        labels.append("長形")
+    if rectangle_score >= 0.42:
+        labels.append("方形/矩形")
+    if corner_score >= 0.35:
+        labels.append("有稜角")
+    if pointiness >= 0.28:
+        labels.append("有尖角")
+    if not labels:
+        labels.append("圓滑/不規則")
+    return (vector if norm == 0.0 else vector / norm), "、".join(labels)
+
+
 def _extract_appearance_vector(cv2: Any, image: Any) -> Any:
     import numpy as np
 
@@ -202,11 +291,14 @@ def _extract_item_feature(cv2: Any, image_path: Path, class_name: str) -> ItemFe
     image = cv2.imread(str(image_path))
     if image is None:
         return None
+    shape_vector, shape_label = _extract_shape_features(cv2, image)
     return ItemFeature(
         class_name=class_name,
         image_path=image_path,
         color_hist=_extract_color_hist(cv2, image),
         edge_vector=_extract_edge_vector(cv2, image),
+        shape_vector=shape_vector,
+        shape_label=shape_label,
         appearance_vector=_extract_appearance_vector(cv2, image),
         descriptors=_extract_orb_descriptors(cv2, image),
     )
@@ -280,11 +372,13 @@ def _compare_features(cv2: Any, query: ItemFeature, reference: ItemFeature) -> M
     color_distance_score = max(0.0, min(1.0, 1.0 - float(color_distance)))
     color_score = (color_corr_score * 0.35) + (color_distance_score * 0.65)
     edge_score = _vector_shape_similarity(query.edge_vector, reference.edge_vector)
+    shape_score = _cosine_similarity(query.shape_vector, reference.shape_vector)
     appearance_score = _cosine_similarity(query.appearance_vector, reference.appearance_vector)
     orb_score = _orb_similarity(cv2, query.descriptors, reference.descriptors)
     total = (
         (color_score * COLOR_WEIGHT)
         + (edge_score * EDGE_WEIGHT)
+        + (shape_score * SHAPE_WEIGHT)
         + (appearance_score * APPEARANCE_WEIGHT)
         + (orb_score * ORB_WEIGHT)
     )
@@ -294,6 +388,7 @@ def _compare_features(cv2: Any, query: ItemFeature, reference: ItemFeature) -> M
         total=max(0.0, min(1.0, total)),
         color=color_score,
         edge=edge_score,
+        shape=shape_score,
         appearance=appearance_score,
         orb=orb_score,
     )
@@ -324,7 +419,8 @@ def _rank_classes(cv2: Any, query: ItemFeature, references: list[ItemFeature]) -
 
 def _format_detail(detail: MatchScore) -> str:
     return (
-        f"顏色 {detail.color:.2f}, 輪廓 {detail.edge:.2f}, "
+        f"顏色 {detail.color:.2f}, 邊緣 {detail.edge:.2f}, "
+        f"形狀 {detail.shape:.2f}, "
         f"外觀 {detail.appearance:.2f}, 細節 {detail.orb:.2f}"
     )
 
