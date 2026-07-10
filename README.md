@@ -230,6 +230,16 @@ P006,Tiffany 色雨傘,199,umbrella_tiffany
 - 「測試加入商品」可在 OpenCV 或攝影機失敗時直接加入商品，仍可完成結帳流程
 - 「檢查資料庫」可確認 CSV、face 資料夾、商品參考照片與商品 class_name
 
+## 商品辨識調整建議
+
+- 商品參考照片放在 `src/item/<class_name>/`，`products.csv` 的 `class_name` 必須和資料夾名稱一致。
+- 商品辨識參數集中在 `src/unmanned_store/utils/item_detector.py` 上方：
+  - `OPENCV_MATCH_THRESHOLD`：辨識通過門檻，調高會比較嚴格，調低會比較容易誤判。
+  - `OPENCV_MIN_MARGIN`：第一名和第二名的最低差距，調高可避免相似商品誤判。
+  - `COLOR_WEIGHT`、`EDGE_WEIGHT`、`APPEARANCE_WEIGHT`、`ORB_WEIGHT`：分別控制顏色、輪廓、整體外觀、局部細節的比重。
+- 每個商品建議至少 8 到 15 張照片，包含正面、側面、斜角、遠近、不同光線；背景盡量單純，商品要佔畫面大部分。
+- 顏色相近或外型相近的商品，例如兩支筆、兩把傘，最需要補不同角度照片；如果照片太少，系統會顯示「商品辨識不確定」並要求重掃。
+
 ## 隱私提醒
 
 - 實際組員的人臉照片不建議 commit 到 GitHub
