@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import math
 import os
 import tempfile
 import time
+import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -11,19 +13,33 @@ from typing import Any
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 ITEM_ROOT = PROJECT_ROOT / "src" / "item"
 MPL_CONFIG_DIR = PROJECT_ROOT / "src" / "unmanned_store" / "temp" / "matplotlib"
+MEDIAPIPE_DIR = PROJECT_ROOT / "src" / "unmanned_store" / "temp" / "mediapipe"
+IMAGE_EMBEDDER_MODEL = MEDIAPIPE_DIR / "image_embedder.tflite"
+IMAGE_EMBEDDER_MODEL_URL = (
+    "https://storage.googleapis.com/mediapipe-models/image_embedder/"
+    "mobilenet_v3_small/image_embedder/float16/latest/image_embedder.tflite"
+)
 MPL_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+MEDIAPIPE_DIR.mkdir(parents=True, exist_ok=True)
 os.environ.setdefault("MPLCONFIGDIR", str(MPL_CONFIG_DIR))
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png"}
-OPENCV_MATCH_THRESHOLD = 0.4
-OPENCV_MIN_MARGIN = 0.06
-OPENCV_TOP_MATCHES = 3
-COLOR_WEIGHT = 0.3
-EDGE_WEIGHT = 0.22
-SHAPE_WEIGHT = 0.18
-APPEARANCE_WEIGHT = 0.2
-ORB_WEIGHT = 0.1
+MEDIAPIPE_MATCH_THRESHOLD = 0.25
+MEDIAPIPE_MIN_MARGIN = 0.04
+TOP_MATCHES = 3
+EMBEDDING_WEIGHT = 0.82
+COLOR_WEIGHT = 0.18
+UMBRELLA_COLOR_WEIGHT = 0.22
 ITEM_SCAN_WINDOW = "item_scan"
+UMBRELLA_GREEN_CLASS = "umbrella_green"
+UMBRELLA_TIFFANY_CLASS = "umbrella_tiffany"
+OWALA_CLASS = "owala"
+UMBRELLA_GREEN_HUE_CENTER = 58.0  #調綠綠閥值
+UMBRELLA_TIFFANY_HUE_CENTER = 92.0
+UMBRELLA_HUE_BOUNDARY_MARGIN = 6.0
+GREEN_BIAS_TRIGGER = 0.14
+GREEN_BIAS_REORDER_MARGIN = 0.06
+GREEN_BIAS_BOOST = 0.14
 
 
 @dataclass
@@ -39,22 +55,20 @@ class DetectionResult:
 class ItemFeature:
     class_name: str
     image_path: Path
+    embedding: list[float]
     color_hist: Any
-    edge_vector: Any
-    shape_vector: Any
-    shape_label: str
-    appearance_vector: Any
-    descriptors: Any
+    hue_center: float
+    green_ratio: float
+    cyan_ratio: float
+    dark_green_ratio: float
 
 
 @dataclass
 class MatchScore:
     total: float
+    embedding: float
     color: float
-    edge: float
-    shape: float
-    appearance: float
-    orb: float
+    umbrella_tone: float
 
 
 @dataclass
@@ -80,6 +94,32 @@ def _load_cv2():
         return None, f"OpenCV 載入失敗: {exc}"
 
 
+def _load_mediapipe():
+    try:
+        import mediapipe as mp  # type: ignore
+        from mediapipe.tasks import python  # type: ignore
+        from mediapipe.tasks.python import vision  # type: ignore
+
+        return mp, python, vision, None
+    except Exception as exc:  # pragma: no cover - depends on local install
+        return None, None, None, f"MediaPipe 載入失敗: {exc}"
+
+
+def ensure_image_embedder_model() -> str | None:
+    if IMAGE_EMBEDDER_MODEL.exists():
+        return None
+    try:
+        urllib.request.urlretrieve(IMAGE_EMBEDDER_MODEL_URL, IMAGE_EMBEDDER_MODEL)
+        return None
+    except Exception as exc:
+        return (
+            "找不到 MediaPipe ImageEmbedder 模型，且自動下載失敗。\n"
+            f"請手動下載到: {IMAGE_EMBEDDER_MODEL}\n"
+            f"下載網址: {IMAGE_EMBEDDER_MODEL_URL}\n"
+            f"錯誤: {exc}"
+        )
+
+
 def _resize_for_feature(cv2: Any, image: Any, max_size: int = 700) -> Any:
     height, width = image.shape[:2]
     scale = min(1.0, max_size / max(height, width))
@@ -101,7 +141,7 @@ def _foreground_mask(cv2: Any, image: Any) -> Any:
     hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
     saturation = hsv[:, :, 1]
     value = hsv[:, :, 2]
-    color_mask = cv2.inRange(saturation, 35, 255)
+    color_mask = cv2.inRange(saturation, 25, 255)
     dark_mask = cv2.inRange(value, 0, 95)
     mask = cv2.bitwise_or(color_mask, dark_mask)
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
@@ -124,7 +164,7 @@ def _foreground_crop(cv2: Any, image: Any) -> Any:
         if area < image_area * 0.002:
             continue
         x, y, box_width, box_height = cv2.boundingRect(contour)
-        if box_width * box_height > image_area * 0.82:
+        if box_width * box_height > image_area * 0.9:
             continue
         boxes.append((x, y, x + box_width, y + box_height))
 
@@ -135,7 +175,7 @@ def _foreground_crop(cv2: Any, image: Any) -> Any:
     top = min(box[1] for box in boxes)
     right = max(box[2] for box in boxes)
     bottom = max(box[3] for box in boxes)
-    padding = int(max(right - left, bottom - top) * 0.16)
+    padding = int(max(right - left, bottom - top) * 0.14)
     left = max(0, left - padding)
     top = max(0, top - padding)
     right = min(width, right + padding)
@@ -151,156 +191,170 @@ def _prepared_image(cv2: Any, image: Any, max_size: int = 700) -> Any:
 
 
 def _extract_color_hist(cv2: Any, image: Any) -> Any:
-    resized = _prepared_image(cv2, image, max_size=420)
-    hsv = cv2.cvtColor(resized, cv2.COLOR_BGR2HSV)
-    hist = cv2.calcHist([hsv], [0, 1, 2], None, [18, 16, 8], [0, 180, 0, 256, 0, 256])
+    target = cv2.resize(_prepared_image(cv2, image, max_size=420), (192, 192))
+    hsv = cv2.cvtColor(target, cv2.COLOR_BGR2HSV)
+    hist = cv2.calcHist([hsv], [0, 1, 2], None, [16, 16, 8], [0, 180, 0, 256, 0, 256])
     cv2.normalize(hist, hist)
     return hist
 
 
-def _extract_edge_vector(cv2: Any, image: Any) -> Any:
-    import numpy as np
-
-    resized = cv2.resize(_prepared_image(cv2, image, max_size=520), (192, 192))
-    gray = cv2.cvtColor(resized, cv2.COLOR_BGR2GRAY)
-    gray = cv2.GaussianBlur(gray, (5, 5), 0)
-    edges = cv2.Canny(gray, 55, 155)
-    grid_scores = []
-    for row in range(4):
-        for col in range(4):
-            cell = edges[row * 48 : (row + 1) * 48, col * 48 : (col + 1) * 48]
-            grid_scores.append(float(cell.mean() / 255.0))
-    horizontal = edges.reshape(12, 16, 192).mean(axis=(1, 2)) / 255.0
-    vertical = edges.reshape(192, 12, 16).mean(axis=(0, 2)) / 255.0
-    vector = np.concatenate(
-        [
-            np.array(grid_scores, dtype=np.float32),
-            horizontal.astype(np.float32),
-            vertical.astype(np.float32),
-        ]
-    )
-    norm = float(np.linalg.norm(vector))
-    return vector if norm == 0.0 else vector / norm
+def _circular_hue_distance(left: float, right: float) -> float:
+    delta = (right - left + 90.0) % 180.0 - 90.0
+    return delta
 
 
-def _extract_shape_features(cv2: Any, image: Any) -> tuple[Any, str]:
-    import math
-    import numpy as np
-
-    prepared = _prepared_image(cv2, image, max_size=520)
-    resized = cv2.resize(prepared, (240, 240))
-    mask = _foreground_mask(cv2, resized)
-    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    if not contours:
-        return np.zeros(9, dtype=np.float32), "形狀不明"
-
-    contour = max(contours, key=cv2.contourArea)
-    area = float(cv2.contourArea(contour))
-    perimeter = float(cv2.arcLength(contour, True))
-    if area <= 1.0 or perimeter <= 1.0:
-        return np.zeros(9, dtype=np.float32), "形狀不明"
-
-    x, y, width, height = cv2.boundingRect(contour)
-    box_area = float(max(1, width * height))
-    long_side = float(max(width, height))
-    short_side = float(max(1, min(width, height)))
-    aspect_ratio = min(1.0, long_side / short_side / 8.0)
-    extent = min(1.0, area / box_area)
-
-    hull = cv2.convexHull(contour)
-    hull_area = float(cv2.contourArea(hull))
-    solidity = min(1.0, area / hull_area) if hull_area > 1.0 else 0.0
-    circularity = min(1.0, (4.0 * math.pi * area) / (perimeter * perimeter))
-
-    epsilon = 0.035 * perimeter
-    approx = cv2.approxPolyDP(contour, epsilon, True)
-    vertices = len(approx)
-    corner_score = max(0.0, min(1.0, vertices / 10.0))
-    rectangle_score = max(0.0, 1.0 - abs(vertices - 4) / 6.0) * extent
-
-    moments = cv2.moments(contour)
-    if moments["m00"] == 0:
-        pointiness = 0.0
-    else:
-        center_x = moments["m10"] / moments["m00"]
-        center_y = moments["m01"] / moments["m00"]
-        points = contour.reshape(-1, 2).astype(np.float32)
-        distances = np.sqrt(((points[:, 0] - center_x) ** 2) + ((points[:, 1] - center_y) ** 2))
-        mean_distance = float(distances.mean()) if len(distances) else 0.0
-        max_distance = float(distances.max()) if len(distances) else 0.0
-        pointiness = max(0.0, min(1.0, (max_distance - mean_distance) / max(mean_distance, 1.0)))
-
-    long_score = max(0.0, min(1.0, (long_side / short_side - 1.0) / 5.0))
-    square_score = max(0.0, 1.0 - abs(width - height) / max(width, height, 1)) * rectangle_score
-
-    vector = np.array(
-        [
-            aspect_ratio,
-            extent,
-            solidity,
-            circularity,
-            corner_score,
-            rectangle_score,
-            pointiness,
-            long_score,
-            square_score,
-        ],
-        dtype=np.float32,
-    )
-    norm = float(np.linalg.norm(vector))
-
-    labels = []
-    if long_score >= 0.42:
-        labels.append("長形")
-    if rectangle_score >= 0.42:
-        labels.append("方形/矩形")
-    if corner_score >= 0.35:
-        labels.append("有稜角")
-    if pointiness >= 0.28:
-        labels.append("有尖角")
-    if not labels:
-        labels.append("圓滑/不規則")
-    return (vector if norm == 0.0 else vector / norm), "、".join(labels)
+def _circular_midpoint(left: float, right: float) -> float:
+    midpoint = left + (_circular_hue_distance(left, right) / 2.0)
+    return midpoint % 180.0
 
 
-def _extract_appearance_vector(cv2: Any, image: Any) -> Any:
-    import numpy as np
+def _extract_hue_center(cv2: Any, image: Any) -> float:
+    target = _prepared_image(cv2, image, max_size=420)
+    hsv = cv2.cvtColor(target, cv2.COLOR_BGR2HSV)
+    hue = hsv[:, :, 0].astype(float)
+    saturation = hsv[:, :, 1].astype(float)
+    value = hsv[:, :, 2].astype(float)
+    weight = saturation * value
+    valid = weight > 0
+    if not valid.any():
+        return 0.0
 
-    resized = cv2.resize(_prepared_image(cv2, image, max_size=520), (96, 96))
-    hsv = cv2.cvtColor(resized, cv2.COLOR_BGR2HSV)
-    gray = cv2.cvtColor(resized, cv2.COLOR_BGR2GRAY)
-    gray = cv2.equalizeHist(gray)
-    small_hsv = cv2.resize(hsv, (32, 32)).astype(np.float32).reshape(-1) / 255.0
-    small_gray = cv2.resize(gray, (48, 48)).astype(np.float32).reshape(-1) / 255.0
-    vector = np.concatenate([small_gray, small_hsv])
-    vector -= float(vector.mean())
-    norm = float(np.linalg.norm(vector))
-    return vector if norm == 0.0 else vector / norm
+    radians = (hue[valid] / 180.0) * (math.pi * 2.0)
+    weights = weight[valid]
+    x = float(sum(math.cos(angle) * weight for angle, weight in zip(radians, weights)))
+    y = float(sum(math.sin(angle) * weight for angle, weight in zip(radians, weights)))
+    if x == 0.0 and y == 0.0:
+        return float(hue[valid].mean())
+    angle = math.atan2(y, x)
+    if angle < 0.0:
+        angle += math.pi * 2.0
+    return (angle / (math.pi * 2.0)) * 180.0
 
 
-def _extract_orb_descriptors(cv2: Any, image: Any) -> Any:
-    resized = _prepared_image(cv2, image)
-    gray = cv2.cvtColor(resized, cv2.COLOR_BGR2GRAY)
-    gray = cv2.equalizeHist(gray)
-    orb = cv2.ORB_create(nfeatures=1200, scaleFactor=1.2, nlevels=8)
-    _, descriptors = orb.detectAndCompute(gray, None)
-    return descriptors
+def _extract_green_cyan_ratio(cv2: Any, image: Any) -> tuple[float, float]:
+    target = _prepared_image(cv2, image, max_size=420)
+    hsv = cv2.cvtColor(target, cv2.COLOR_BGR2HSV)
+    hue = hsv[:, :, 0]
+    saturation = hsv[:, :, 1]
+    value = hsv[:, :, 2]
+
+    valid_mask = (saturation >= 25) & (value >= 18)
+    valid_count = int(valid_mask.sum())
+    if valid_count <= 0:
+        return 0.0, 0.0
+
+    green_mask = valid_mask & (hue >= 30) & (hue <= 92)
+    cyan_mask = valid_mask & (hue >= 76) & (hue <= 108)
+    return float(green_mask.sum() / valid_count), float(cyan_mask.sum() / valid_count)
 
 
-def _extract_item_feature(cv2: Any, image_path: Path, class_name: str) -> ItemFeature | None:
+def _extract_dark_green_ratio(cv2: Any, image: Any) -> float:
+    target = _prepared_image(cv2, image, max_size=420)
+    hsv = cv2.cvtColor(target, cv2.COLOR_BGR2HSV)
+    hue = hsv[:, :, 0]
+    saturation = hsv[:, :, 1]
+    value = hsv[:, :, 2]
+
+    dark_green_mask = (hue >= 32) & (hue <= 88) & (saturation >= 28) & (value >= 12)
+    total_mask = (saturation >= 18) & (value >= 10)
+    total_count = int(total_mask.sum())
+    if total_count <= 0:
+        return 0.0
+    return float(dark_green_mask.sum() / total_count)
+
+
+def _color_similarity(cv2: Any, left: Any, right: Any) -> float:
+    corr = cv2.compareHist(left, right, cv2.HISTCMP_CORREL)
+    corr_score = max(0.0, min(1.0, (float(corr) + 1.0) / 2.0))
+    distance = cv2.compareHist(left, right, cv2.HISTCMP_BHATTACHARYYA)
+    distance_score = max(0.0, min(1.0, 1.0 - float(distance)))
+    return (corr_score * 0.42) + (distance_score * 0.58)
+
+
+def _cosine_similarity(left: list[float], right: list[float]) -> float:
+    if len(left) != len(right) or not left:
+        return 0.0
+    dot = sum(a * b for a, b in zip(left, right))
+    left_norm = math.sqrt(sum(a * a for a in left))
+    right_norm = math.sqrt(sum(b * b for b in right))
+    if left_norm == 0.0 or right_norm == 0.0:
+        return 0.0
+    return max(0.0, min(1.0, dot / (left_norm * right_norm)))
+
+
+def _extract_embedding(
+    cv2: Any,
+    mp: Any,
+    embedder: Any,
+    image: Any,
+) -> list[float] | None:
+    try:
+        import numpy as np
+    except Exception:
+        return None
+
+    target = _prepared_image(cv2, image)
+    crops = [
+        target,
+        _center_crop(target, ratio=0.84),
+        _center_crop(target, ratio=0.66),
+    ]
+
+    vectors: list[Any] = []
+    for crop in crops:
+        if crop is None or crop.size == 0:
+            continue
+        rgb = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
+        mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
+        result = embedder.embed(mp_image)
+        if not result.embeddings:
+            continue
+        vector = result.embeddings[0].embedding
+        if vector is None:
+            continue
+        vector_array = np.asarray(vector, dtype=np.float32).reshape(-1)
+        if vector_array.size == 0:
+            continue
+        vectors.append(vector_array)
+
+    if not vectors:
+        return None
+
+    average = sum(vectors) / float(len(vectors))
+    norm = float(np.linalg.norm(average))
+    if norm == 0.0:
+        return None
+    return (average / norm).tolist()
+
+
+def _extract_item_feature(
+    cv2: Any,
+    mp: Any,
+    embedder: Any,
+    image_path: Path,
+    class_name: str,
+) -> ItemFeature | None:
     image = cv2.imread(str(image_path))
     if image is None:
         return None
-    shape_vector, shape_label = _extract_shape_features(cv2, image)
+
+    embedding = _extract_embedding(cv2, mp, embedder, image)
+    if embedding is None:
+        return None
+
+    hue_center = _extract_hue_center(cv2, image)
+    green_ratio, cyan_ratio = _extract_green_cyan_ratio(cv2, image)
+    dark_green_ratio = _extract_dark_green_ratio(cv2, image)
+
     return ItemFeature(
         class_name=class_name,
         image_path=image_path,
+        embedding=embedding,
         color_hist=_extract_color_hist(cv2, image),
-        edge_vector=_extract_edge_vector(cv2, image),
-        shape_vector=shape_vector,
-        shape_label=shape_label,
-        appearance_vector=_extract_appearance_vector(cv2, image),
-        descriptors=_extract_orb_descriptors(cv2, image),
+        hue_center=hue_center,
+        green_ratio=green_ratio,
+        cyan_ratio=cyan_ratio,
+        dark_green_ratio=dark_green_ratio,
     )
 
 
@@ -317,81 +371,134 @@ def _reference_image_paths() -> list[tuple[str, Path]]:
     return paths
 
 
-def _load_reference_features(cv2: Any) -> list[ItemFeature]:
+def _load_reference_features(cv2: Any, mp: Any, embedder: Any) -> list[ItemFeature]:
     features: list[ItemFeature] = []
     for class_name, image_path in _reference_image_paths():
-        feature = _extract_item_feature(cv2, image_path, class_name)
+        feature = _extract_item_feature(cv2, mp, embedder, image_path, class_name)
         if feature is not None:
             features.append(feature)
     return features
 
 
-def _orb_similarity(cv2: Any, left: Any, right: Any) -> float:
-    if left is None or right is None or len(left) < 2 or len(right) < 2:
-        return 0.0
-    matcher = cv2.BFMatcher(cv2.NORM_HAMMING)
-    matches = matcher.knnMatch(left, right, k=2)
-    good = 0
-    distance_total = 0.0
-    for pair in matches:
-        if len(pair) < 2:
+def _class_hue_centers(references: list[ItemFeature]) -> dict[str, float]:
+    grouped: dict[str, list[float]] = {}
+    for feature in references:
+        grouped.setdefault(feature.class_name, []).append(feature.hue_center)
+
+    centers: dict[str, float] = {}
+    for class_name, values in grouped.items():
+        if not values:
             continue
-        first, second = pair
-        if first.distance < 0.72 * second.distance:
-            good += 1
-            distance_total += float(first.distance)
-    if good == 0:
-        return 0.0
-    match_count_score = min(1.0, good / 38)
-    distance_score = max(0.0, 1.0 - ((distance_total / good) / 80.0))
-    return (match_count_score * 0.72) + (distance_score * 0.28)
+        radians = [(value / 180.0) * (math.pi * 2.0) for value in values]
+        x = sum(math.cos(angle) for angle in radians)
+        y = sum(math.sin(angle) for angle in radians)
+        if x == 0.0 and y == 0.0:
+            centers[class_name] = sum(values) / len(values)
+            continue
+        angle = math.atan2(y, x)
+        if angle < 0.0:
+            angle += math.pi * 2.0
+        centers[class_name] = (angle / (math.pi * 2.0)) * 180.0
+    return centers
 
 
-def _cosine_similarity(left: Any, right: Any) -> float:
-    import numpy as np
+def _umbrella_hue_bias(query_hue: float, green_hue: float, tiffany_hue: float) -> tuple[float, float]:
+    green_hue = green_hue or UMBRELLA_GREEN_HUE_CENTER
+    tiffany_hue = tiffany_hue or UMBRELLA_TIFFANY_HUE_CENTER
 
-    left_norm = float(np.linalg.norm(left))
-    right_norm = float(np.linalg.norm(right))
-    if left_norm == 0.0 or right_norm == 0.0:
-        return 0.0
-    raw = float(np.dot(left, right) / (left_norm * right_norm))
-    return max(0.0, min(1.0, (raw + 1.0) / 2.0))
+    distance_to_green = abs(_circular_hue_distance(query_hue, green_hue))
+    distance_to_tiffany = abs(_circular_hue_distance(query_hue, tiffany_hue))
+    boundary = _circular_midpoint(green_hue, tiffany_hue)
+    distance_to_boundary = abs(_circular_hue_distance(query_hue, boundary))
 
+    if distance_to_boundary <= UMBRELLA_HUE_BOUNDARY_MARGIN:
+        blend = max(0.0, min(1.0, distance_to_boundary / max(UMBRELLA_HUE_BOUNDARY_MARGIN, 1.0)))
+        if distance_to_green < distance_to_tiffany:
+            return 0.65 + (0.35 * (1.0 - blend)), 0.35 * blend
+        return 0.35 * blend, 0.65 + (0.35 * (1.0 - blend))
 
-def _vector_shape_similarity(left: Any, right: Any) -> float:
-    import numpy as np
-
-    diff = float(np.mean(np.abs(left - right)))
-    return max(0.0, min(1.0, 1.0 - (diff * 3.2)))
+    gap = abs(distance_to_green - distance_to_tiffany)
+    if gap < 1.0:
+        return 0.5, 0.5
+    if distance_to_green < distance_to_tiffany:
+        return 1.0, 0.0
+    return 0.0, 1.0
 
 
 def _compare_features(cv2: Any, query: ItemFeature, reference: ItemFeature) -> MatchScore:
-    color_corr = cv2.compareHist(query.color_hist, reference.color_hist, cv2.HISTCMP_CORREL)
-    color_corr_score = max(0.0, min(1.0, (float(color_corr) + 1.0) / 2.0))
-    color_distance = cv2.compareHist(query.color_hist, reference.color_hist, cv2.HISTCMP_BHATTACHARYYA)
-    color_distance_score = max(0.0, min(1.0, 1.0 - float(color_distance)))
-    color_score = (color_corr_score * 0.35) + (color_distance_score * 0.65)
-    edge_score = _vector_shape_similarity(query.edge_vector, reference.edge_vector)
-    shape_score = _cosine_similarity(query.shape_vector, reference.shape_vector)
-    appearance_score = _cosine_similarity(query.appearance_vector, reference.appearance_vector)
-    orb_score = _orb_similarity(cv2, query.descriptors, reference.descriptors)
-    total = (
-        (color_score * COLOR_WEIGHT)
-        + (edge_score * EDGE_WEIGHT)
-        + (shape_score * SHAPE_WEIGHT)
-        + (appearance_score * APPEARANCE_WEIGHT)
-        + (orb_score * ORB_WEIGHT)
-    )
-    if orb_score == 0.0:
-        total *= 0.9
+    embedding_score = _cosine_similarity(query.embedding, reference.embedding)
+    color_score = _color_similarity(cv2, query.color_hist, reference.color_hist)
+    umbrella_tone_score = 0.5
+    if reference.class_name in {UMBRELLA_GREEN_CLASS, UMBRELLA_TIFFANY_CLASS}:
+        query_bias = (query.green_ratio + query.dark_green_ratio) - (query.cyan_ratio * 1.15)
+        reference_bias = (reference.green_ratio + reference.dark_green_ratio) - (reference.cyan_ratio * 1.15)
+        umbrella_tone_score = max(0.0, min(1.0, 1.0 - (abs(query_bias - reference_bias) * 2.0)))
+    total = (embedding_score * EMBEDDING_WEIGHT) + (color_score * COLOR_WEIGHT)
+    if reference.class_name in {UMBRELLA_GREEN_CLASS, UMBRELLA_TIFFANY_CLASS}:
+        total = (total * (1.0 - UMBRELLA_COLOR_WEIGHT)) + (umbrella_tone_score * UMBRELLA_COLOR_WEIGHT)
     return MatchScore(
         total=max(0.0, min(1.0, total)),
+        embedding=embedding_score,
         color=color_score,
-        edge=edge_score,
-        shape=shape_score,
-        appearance=appearance_score,
-        orb=orb_score,
+        umbrella_tone=umbrella_tone_score,
     )
+
+
+def _apply_green_bias_rerank(
+    query: ItemFeature,
+    ranked: list[ClassMatch],
+    hue_centers: dict[str, float],
+) -> list[ClassMatch]:
+    if len(ranked) < 2:
+        return ranked
+
+    green_match = next((match for match in ranked if match.class_name == UMBRELLA_GREEN_CLASS), None)
+    tiffany_match = next((match for match in ranked if match.class_name == UMBRELLA_TIFFANY_CLASS), None)
+    if green_match is None or tiffany_match is None:
+        return ranked
+
+    query_hue = query.hue_center
+    if query_hue == 0.0:
+        return ranked
+
+    green_hue = hue_centers.get(UMBRELLA_GREEN_CLASS)
+    tiffany_hue = hue_centers.get(UMBRELLA_TIFFANY_CLASS)
+    if green_hue is None or tiffany_hue is None:
+        return ranked
+
+    green_bias, tiffany_bias = _umbrella_hue_bias(query_hue, green_hue, tiffany_hue)
+    if green_bias == tiffany_bias == 0.5:
+        return ranked
+
+    if query.dark_green_ratio >= 0.18:
+        green_bias = min(1.0, green_bias + 0.25)
+        tiffany_bias = max(0.0, tiffany_bias - 0.25)
+
+    boosted: list[ClassMatch] = []
+    for match in ranked:
+        if match.class_name == UMBRELLA_GREEN_CLASS:
+            boosted_score = match.score + (green_bias * GREEN_BIAS_BOOST)
+            boosted.append(
+                ClassMatch(
+                    class_name=match.class_name,
+                    score=max(0.0, min(1.0, boosted_score)),
+                    reference_path=match.reference_path,
+                    detail=match.detail,
+                )
+            )
+        elif match.class_name == UMBRELLA_TIFFANY_CLASS:
+            boosted_score = match.score + (tiffany_bias * GREEN_BIAS_BOOST)
+            boosted.append(
+                ClassMatch(
+                    class_name=match.class_name,
+                    score=max(0.0, min(1.0, boosted_score)),
+                    reference_path=match.reference_path,
+                    detail=match.detail,
+                )
+            )
+        else:
+            boosted.append(match)
+    return sorted(boosted, key=lambda item: item.score, reverse=True)
 
 
 def _rank_classes(cv2: Any, query: ItemFeature, references: list[ItemFeature]) -> list[ClassMatch]:
@@ -403,7 +510,7 @@ def _rank_classes(cv2: Any, query: ItemFeature, references: list[ItemFeature]) -
     ranked: list[ClassMatch] = []
     for class_name, scores in scores_by_class.items():
         ordered = sorted(scores, key=lambda item: item[0].total, reverse=True)
-        top_scores = ordered[:OPENCV_TOP_MATCHES]
+        top_scores = ordered[:TOP_MATCHES]
         average_top = sum(score.total for score, _ in top_scores) / len(top_scores)
         class_score = (ordered[0][0].total * 0.68) + (average_top * 0.32)
         ranked.append(
@@ -418,11 +525,7 @@ def _rank_classes(cv2: Any, query: ItemFeature, references: list[ItemFeature]) -
 
 
 def _format_detail(detail: MatchScore) -> str:
-    return (
-        f"顏色 {detail.color:.2f}, 邊緣 {detail.edge:.2f}, "
-        f"形狀 {detail.shape:.2f}, "
-        f"外觀 {detail.appearance:.2f}, 細節 {detail.orb:.2f}"
-    )
+    return f"語意特徵 {detail.embedding:.2f}, 色彩 {detail.color:.2f}"
 
 
 def capture_product_image() -> tuple[Path | None, str]:
@@ -437,13 +540,11 @@ def capture_product_image() -> tuple[Path | None, str]:
         return None, "攝影機無法開啟，請確認鏡頭是否被其他程式占用。"
 
     temp_file = Path(tempfile.gettempdir()) / "unmanned_store_product_scan.jpg"
-    start = time.time()
     try:
         while True:
             ok, frame = camera.read()
             if not ok:
                 return None, "攝影機讀取失敗。"
-            frame = cv2.flip(frame, 1)
             cv2.putText(
                 frame,
                 "Put item in view. SPACE scan, ESC cancel",
@@ -457,7 +558,7 @@ def capture_product_image() -> tuple[Path | None, str]:
             key = cv2.waitKey(1) & 0xFF
             if key == 27:
                 return None, "使用者取消商品掃描。"
-            if key == 32 or time.time() - start > 8:
+            if key == 32:
                 cv2.imwrite(str(temp_file), frame)
                 return temp_file, "已拍攝商品影像。"
     except Exception as exc:
@@ -468,22 +569,61 @@ def capture_product_image() -> tuple[Path | None, str]:
 
 
 def detect_from_image(image_path: Path) -> DetectionResult:
-    cv2, error = _load_cv2()
-    if error:
-        return DetectionResult(False, message=error)
+    cv2, cv2_error = _load_cv2()
+    if cv2_error:
+        return DetectionResult(False, message=cv2_error)
 
     if find_item_reference_root() is None:
         return DetectionResult(False, message="找不到商品參考資料夾，請確認 src/item/ 是否存在。")
 
-    query = _extract_item_feature(cv2, image_path, "__query__")
-    if query is None:
+    model_error = ensure_image_embedder_model()
+    if model_error:
+        return DetectionResult(False, message=model_error)
+
+    mp, mp_tasks, vision, mp_error = _load_mediapipe()
+    if mp_error:
+        return DetectionResult(False, message=mp_error)
+
+    image = cv2.imread(str(image_path))
+    if image is None:
         return DetectionResult(False, message="商品影像讀取失敗，請重新掃描。")
 
-    references = _load_reference_features(cv2)
+    try:
+        base_options = mp_tasks.BaseOptions(model_asset_path=str(IMAGE_EMBEDDER_MODEL))
+        options = vision.ImageEmbedderOptions(
+            base_options=base_options,
+            running_mode=vision.RunningMode.IMAGE,
+            l2_normalize=True,
+            quantize=False,
+        )
+        with vision.ImageEmbedder.create_from_options(options) as embedder:
+            query_embedding = _extract_embedding(cv2, mp, embedder, image)
+            if query_embedding is None:
+                return DetectionResult(False, message="無法從掃描畫面擷取商品特徵，請重新掃描。")
+            query_green_ratio, query_cyan_ratio = _extract_green_cyan_ratio(cv2, image)
+            query_dark_green_ratio = _extract_dark_green_ratio(cv2, image)
+            query_hue_center = _extract_hue_center(cv2, image)
+
+            query = ItemFeature(
+                class_name="__query__",
+                image_path=image_path,
+                embedding=query_embedding,
+                color_hist=_extract_color_hist(cv2, image),
+                hue_center=query_hue_center,
+                green_ratio=query_green_ratio,
+                cyan_ratio=query_cyan_ratio,
+                dark_green_ratio=query_dark_green_ratio,
+            )
+            references = _load_reference_features(cv2, mp, embedder)
+    except Exception as exc:
+        return DetectionResult(False, message=f"MediaPipe 商品特徵擷取失敗: {exc}")
+
     if not references:
         return DetectionResult(False, message="src/item/ 沒有可用的商品參考照片。")
 
+    hue_centers = _class_hue_centers(references)
     ranked = _rank_classes(cv2, query, references)
+    ranked = _apply_green_bias_rerank(query, ranked, hue_centers)
     if not ranked:
         return DetectionResult(False, message="src/item/ 沒有可用的商品參考照片。")
 
@@ -491,37 +631,24 @@ def detect_from_image(image_path: Path) -> DetectionResult:
     runner_up = ranked[1] if len(ranked) > 1 else None
     margin = best.score - (runner_up.score if runner_up else 0.0)
 
-    if best.score < OPENCV_MATCH_THRESHOLD:
+    if best.score < MEDIAPIPE_MATCH_THRESHOLD:
         return DetectionResult(
             False,
-            message=(
-                f"商品辨識失敗，最高相似度 {best.score:.2f}，低於門檻 "
-                f"{OPENCV_MATCH_THRESHOLD:.2f}。\n"
-                f"第一名: {best.class_name} ({_format_detail(best.detail)})\n"
-                "請讓商品置中、靠近鏡頭，背景保持單純後重新掃描。"
-            ),
+            message="商品辨識失敗，請讓商品置中、靠近鏡頭後重新掃描。",
         )
 
-    if runner_up and margin < OPENCV_MIN_MARGIN:
+    if runner_up and margin < MEDIAPIPE_MIN_MARGIN:
         return DetectionResult(
             False,
-            message=(
-                f"商品辨識不確定，第一名 {best.class_name} {best.score:.2f}，"
-                f"第二名 {runner_up.class_name} {runner_up.score:.2f}，差距 {margin:.2f}。\n"
-                "這通常代表參考照片太少、角度太像，或背景干擾太高；請補拍更多角度後再掃描。"
-            ),
+            message="商品辨識不夠明確，請調整角度或距離後再掃描。",
         )
 
     return DetectionResult(
         True,
         class_name=best.class_name,
         confidence=best.score,
-        message=(
-            f"OpenCV 商品辨識成功，分數 {best.score:.2f}。\n"
-            f"{_format_detail(best.detail)}\n"
-            f"參考圖: {best.reference_path}"
-        ),
-        model_path=str(ITEM_ROOT),
+        message=f"MediaPipe 商品辨識成功，商品: {best.class_name}，分數 {best.score:.2f}。",
+        model_path=str(IMAGE_EMBEDDER_MODEL),
     )
 
 
