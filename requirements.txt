@@ -1,6 +1,5 @@
 opencv-python
-deepface
 ultralytics
 pillow
 pandas
-tf-keras
+mediapipe

@@ -117,7 +117,7 @@ class UnmannedStoreApp(tk.Tk):
             ("測試一般會員", self.test_general_member),
             ("測試加入商品", self.test_add_product),
             ("檢查資料庫", self.check_database),
-            ("測試 DeepFace 單次辨識", self.test_deepface_once),
+            ("測試 Landmark 單次辨識", self.test_landmark_once),
             ("測試 YOLO 單次辨識", self.test_yolo_once),
             ("重置現場會員", self.reset_demo_member_data),
         ]
@@ -266,11 +266,11 @@ class UnmannedStoreApp(tk.Tk):
         )
         messagebox.showinfo("資料庫檢查", "\n".join(lines))
 
-    def test_deepface_once(self) -> None:
+    def test_landmark_once(self) -> None:
         result = scan_member()
         if result.success and result.member:
             messagebox.showinfo(
-                "DeepFace 單次辨識",
+                "Landmark 單次辨識",
                 "\n".join(
                     [
                         "辨識成功",
@@ -281,7 +281,7 @@ class UnmannedStoreApp(tk.Tk):
                 ),
             )
         else:
-            messagebox.showwarning("DeepFace 單次辨識", f"辨識失敗\n原因: {result.message}")
+            messagebox.showwarning("Landmark 單次辨識", f"辨識失敗\n原因: {result.message}")
 
     def test_yolo_once(self) -> None:
         result = scan_item()

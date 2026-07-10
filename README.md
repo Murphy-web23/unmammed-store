@@ -2,7 +2,7 @@
 
 ## 專題簡介
 
-這是一個結合 Tkinter、OpenCV、DeepFace、YOLO 的無人商店自助結帳系統。系統以「能穩定 demo」為優先，正式辨識流程之外，也保留測試模式，避免現場攝影機、模型或光線不穩造成展示中斷。
+這是一個結合 Tkinter、OpenCV、MediaPipe Face Landmark、YOLO 的無人商店自助結帳系統。系統以「能穩定 demo」為優先，正式辨識流程之外，也保留測試模式，避免現場攝影機、模型或光線不穩造成展示中斷。
 
 系統可以：
 
@@ -21,7 +21,7 @@
 - Python：主要程式語言
 - Tkinter：GUI 介面
 - OpenCV：攝影機、拍照、影像處理
-- DeepFace：會員人臉辨識
+- MediaPipe Face Landmark：會員人臉特徵點辨識
 - YOLO / Ultralytics：商品辨識
 - CSV：會員資料與商品資料儲存
 - Decimal：折扣金額四捨五入
@@ -59,7 +59,7 @@
 - 測試一般會員
 - 測試加入商品
 - 檢查資料庫
-- 測試 DeepFace 單次辨識
+- 測試 Landmark 單次辨識
 - 測試 YOLO 單次辨識
 - 重置現場會員
 
@@ -132,7 +132,7 @@ pip install -r requirements.txt
 或手動安裝：
 
 ```bash
-pip install opencv-python deepface ultralytics pillow pandas
+pip install opencv-python mediapipe ultralytics pillow pandas
 ```
 
 執行主程式：
@@ -215,7 +215,7 @@ P004,水,20,water
 
 ## 注意事項與備用方案
 
-- DeepFace 可能受光線、角度、鏡頭距離影響
+- MediaPipe Face Landmark 可能受光線、角度、鏡頭距離影響
 - YOLO 可能受商品角度與光線影響
 - demo 當天如果辨識不穩，可以使用測試模式展示完整流程
 - 「測試非會員」可展示 A 同學原價結帳
