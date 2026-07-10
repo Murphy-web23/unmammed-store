@@ -17,6 +17,24 @@ def _load_cv2():
         return None, f"OpenCV 載入失敗: {exc}"
 
 
+def _show_completion(cv2, frame, text: str, duration: float = 1.2) -> None:
+    start = time.time()
+    while time.time() - start < duration:
+        display = frame.copy()
+        cv2.putText(
+            display,
+            text,
+            (30, 110),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            1,
+            (0, 200, 255),
+            2,
+        )
+        cv2.imshow("加入會員拍照 - ESC 取消", display)
+        if cv2.waitKey(1) & 0xFF == 27:
+            break
+
+
 def capture_member_photos(target_folder: Path, count: int = 3) -> tuple[bool, str]:
     cv2, error = _load_cv2()
     if error:
@@ -24,6 +42,7 @@ def capture_member_photos(target_folder: Path, count: int = 3) -> tuple[bool, st
 
     target_folder.mkdir(parents=True, exist_ok=True)
     prompts = ["請看正前方", "請稍微左轉", "請稍微右轉"]
+    completed_prompts = ["正面拍攝完成", "左轉拍攝完成", "右轉拍攝完成"]
     camera = cv2.VideoCapture(0)
     if not camera.isOpened():
         camera.release()
@@ -32,12 +51,13 @@ def capture_member_photos(target_folder: Path, count: int = 3) -> tuple[bool, st
 
     try:
         for index in range(count):
-            for number in (3, 2, 1):
+            for number in (5, 4, 3, 2, 1):
                 start = time.time()
                 while time.time() - start < 1:
                     ok, frame = camera.read()
                     if not ok:
                         return False, "攝影機讀取失敗。"
+                    frame = cv2.flip(frame, 1)
                     text = f"{prompts[index]}  {number}"
                     cv2.putText(
                         frame,
@@ -55,7 +75,9 @@ def capture_member_photos(target_folder: Path, count: int = 3) -> tuple[bool, st
             ok, frame = camera.read()
             if not ok:
                 return False, "攝影機讀取失敗。"
+            frame = cv2.flip(frame, 1)
             cv2.imwrite(str(target_folder / f"{index + 1}.jpg"), frame)
+            _show_completion(cv2, frame, completed_prompts[index])
         return True, "會員照片拍攝完成。"
     except Exception as exc:
         return False, f"拍照流程發生錯誤: {exc}"

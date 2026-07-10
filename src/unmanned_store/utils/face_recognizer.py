@@ -5,6 +5,7 @@ import time
 import os
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from .member_manager import FACE_ROOT, PROJECT_ROOT, Member, get_member_by_face_folder
 
@@ -23,6 +24,10 @@ class FaceRecognitionResult:
     member: Member | None = None
     identity_path: str = ""
     message: str = ""
+
+
+def _safe_mirror_frame(cv2: Any, frame: Any) -> Any:
+    return cv2.flip(frame, 1)
 
 
 def _load_cv2():
@@ -61,6 +66,7 @@ def capture_face_image() -> tuple[Path | None, str]:
             ok, frame = camera.read()
             if not ok:
                 return None, "攝影機讀取失敗。"
+            frame = _safe_mirror_frame(cv2, frame)
             cv2.putText(
                 frame,
                 "Press SPACE to scan, ESC to cancel",
@@ -93,18 +99,45 @@ def recognize_from_image(image_path: Path) -> FaceRecognitionResult:
         return FaceRecognitionResult(False, message="src/face/ 不存在，無法辨識會員。")
 
     try:
-        results = DeepFace.find(
-            img_path=str(image_path),
-            db_path=str(FACE_ROOT),
-            enforce_detection=False,
-            silent=True,
-        )
+        find_kwargs = {
+            "img_path": str(image_path),
+            "db_path": str(FACE_ROOT),
+            "model_name": "VGG-Face",
+            "distance_metric": "cosine",
+            "detector_backend": "opencv",
+            "enforce_detection": False,
+            "align": True,
+            "silent": True,
+            "refresh_database": True,
+        }
+        try:
+            results = DeepFace.find(**find_kwargs)
+        except TypeError:
+            find_kwargs.pop("refresh_database", None)
+            results = DeepFace.find(**find_kwargs)
         frames = results if isinstance(results, list) else [results]
         best_identity = ""
+        best_distance = float("inf")
         for frame in frames:
             if frame is not None and not frame.empty and "identity" in frame.columns:
-                best_identity = str(frame.iloc[0]["identity"])
-                break
+                distance_columns = [
+                    column
+                    for column in frame.columns
+                    if column.endswith("_cosine")
+                    or column.endswith("_euclidean")
+                    or column == "distance"
+                ]
+                sorted_frame = frame
+                if distance_columns:
+                    sorted_frame = frame.sort_values(distance_columns[0], ascending=True)
+                row = sorted_frame.iloc[0]
+                distance = float(row[distance_columns[0]]) if distance_columns else 0.0
+                threshold = float(row["threshold"]) if "threshold" in row and row["threshold"] else None
+                if threshold is not None and distance > threshold:
+                    continue
+                if distance < best_distance:
+                    best_distance = distance
+                    best_identity = str(row["identity"])
         if not best_identity:
             return FaceRecognitionResult(False, message="查無會員資料。")
 

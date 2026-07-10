@@ -72,6 +72,7 @@ def capture_product_image() -> tuple[Path | None, str]:
             ok, frame = camera.read()
             if not ok:
                 return None, "攝影機讀取失敗。"
+            frame = cv2.flip(frame, 1)
             cv2.putText(
                 frame,
                 "Put item in view. SPACE scan, ESC cancel",
