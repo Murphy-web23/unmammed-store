@@ -149,6 +149,41 @@ def add_member(name: str, level: str, face_folder: Path) -> Member:
     return member
 
 
+def add_member_row(name: str, level: str, discount: float, face_folder: str) -> Member:
+    member = Member(
+        member_id=next_member_id(),
+        name=name.strip(),
+        level=level.strip(),
+        discount=float(discount),
+        face_folder=face_folder.strip(),
+    )
+    members = read_members()
+    members.append(member)
+    write_members(members)
+    return member
+
+
+def update_member(updated: Member) -> bool:
+    members = read_members()
+    for index, member in enumerate(members):
+        if member.member_id == updated.member_id:
+            members[index] = updated
+            write_members(members)
+            return True
+    return False
+
+
+def delete_member(member_id: str) -> bool:
+    if member_id == "M001":
+        return False
+    members = read_members()
+    kept = [member for member in members if member.member_id != member_id]
+    if len(kept) == len(members):
+        return False
+    write_members(kept or [Member.from_row(DEFAULT_MEMBER)])
+    return True
+
+
 def reset_demo_members() -> tuple[int, int]:
     members = read_members()
     kept = [member for member in members if member.member_id == "M001"]

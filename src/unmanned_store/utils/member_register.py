@@ -51,32 +51,37 @@ def capture_member_photos(target_folder: Path, count: int = 3) -> tuple[bool, st
 
     try:
         for index in range(count):
-            for number in (5, 4, 3, 2, 1):
-                start = time.time()
-                while time.time() - start < 1:
-                    ok, frame = camera.read()
-                    if not ok:
-                        return False, "攝影機讀取失敗。"
-                    frame = cv2.flip(frame, 1)
-                    text = f"{prompts[index]}  {number}"
-                    cv2.putText(
-                        frame,
-                        text,
-                        (30, 60),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        1,
-                        (0, 255, 0),
-                        2,
-                    )
-                    cv2.imshow("加入會員拍照 - ESC 取消", frame)
-                    if cv2.waitKey(1) & 0xFF == 27:
-                        return False, "使用者取消拍照。"
-
-            ok, frame = camera.read()
-            if not ok:
-                return False, "攝影機讀取失敗。"
-            frame = cv2.flip(frame, 1)
-            cv2.imwrite(str(target_folder / f"{index + 1}.jpg"), frame)
+            while True:
+                ok, frame = camera.read()
+                if not ok:
+                    return False, "攝影機讀取失敗。"
+                frame = cv2.flip(frame, 1)
+                text = f"{prompts[index]}  SPACE拍照 ({index + 1}/{count})"
+                cv2.putText(
+                    frame,
+                    text,
+                    (30, 60),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.8,
+                    (0, 255, 0),
+                    2,
+                )
+                cv2.putText(
+                    frame,
+                    "ESC 取消",
+                    (30, 95),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.7,
+                    (0, 255, 255),
+                    2,
+                )
+                cv2.imshow("加入會員拍照 - ESC 取消", frame)
+                key = cv2.waitKey(1) & 0xFF
+                if key == 27:
+                    return False, "使用者取消拍照。"
+                if key == 32:
+                    cv2.imwrite(str(target_folder / f"{index + 1}.jpg"), frame)
+                    break
             _show_completion(cv2, frame, completed_prompts[index])
         return True, "會員照片拍攝完成。"
     except Exception as exc:

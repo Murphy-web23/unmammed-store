@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import os
 import tempfile
-import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -40,6 +39,7 @@ class ItemFeature:
     class_name: str
     image_path: Path
     color_hist: Any
+    green_hist: Any
     edge_vector: Any
     shape_vector: Any
     shape_label: str
@@ -147,7 +147,59 @@ def _foreground_crop(cv2: Any, image: Any) -> Any:
 
 def _prepared_image(cv2: Any, image: Any, max_size: int = 700) -> Any:
     resized = _resize_for_feature(cv2, image, max_size=max_size)
-    return _foreground_crop(cv2, resized)
+    enhanced = _preprocess_lighting_and_color(cv2, resized)
+    return _foreground_crop(cv2, enhanced)
+
+
+def _dynamic_color_balance(cv2: Any, image: Any) -> Any:
+    import numpy as np
+
+    # Dynamic Color Balancing: 用灰世界假設校正 BGR 三通道，降低偏色光源影響。
+    bgr = image.astype(np.float32)
+    channel_means = bgr.reshape(-1, 3).mean(axis=0)
+    target_mean = float(channel_means.mean())
+    scales = np.where(channel_means > 1e-6, target_mean / channel_means, 1.0)
+    balanced = bgr * scales.reshape(1, 1, 3)
+    return np.clip(balanced, 0, 255).astype(np.uint8)
+
+
+def _apply_clahe_lighting(cv2: Any, image: Any) -> Any:
+    # CLAHE: 在 LAB 的 L 通道做局部對比增強，提升暗光下可辨識細節。
+    lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB)
+    l_channel, a_channel, b_channel = cv2.split(lab)
+    clahe = cv2.createCLAHE(clipLimit=2.4, tileGridSize=(8, 8))
+    l_enhanced = clahe.apply(l_channel)
+    merged = cv2.merge((l_enhanced, a_channel, b_channel))
+    return cv2.cvtColor(merged, cv2.COLOR_LAB2BGR)
+
+
+def _enhance_hsv_green_separation(cv2: Any, image: Any) -> Any:
+    import numpy as np
+
+    hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV).astype(np.float32)
+    hue = hsv[:, :, 0]
+    sat = hsv[:, :, 1]
+    val = hsv[:, :, 2]
+
+    sat = np.clip((sat - 18.0) * 1.18, 0, 255)
+    val = np.clip((val - 10.0) * 1.08, 0, 255)
+
+    green_mask = (hue >= 35.0) & (hue <= 95.0)
+    hue_adjust = np.zeros_like(hue)
+    hue_adjust[(hue >= 40.0) & (hue < 60.0)] = -2.0
+    hue_adjust[(hue >= 75.0) & (hue <= 95.0)] = 2.0
+    hue = np.where(green_mask, np.clip(hue + hue_adjust, 0, 179), hue)
+
+    hsv[:, :, 0] = hue
+    hsv[:, :, 1] = sat
+    hsv[:, :, 2] = val
+    return cv2.cvtColor(hsv.astype(np.uint8), cv2.COLOR_HSV2BGR)
+
+
+def _preprocess_lighting_and_color(cv2: Any, image: Any) -> Any:
+    balanced = _dynamic_color_balance(cv2, image)
+    clahe_image = _apply_clahe_lighting(cv2, balanced)
+    return _enhance_hsv_green_separation(cv2, clahe_image)
 
 
 def _extract_color_hist(cv2: Any, image: Any) -> Any:
@@ -155,7 +207,10 @@ def _extract_color_hist(cv2: Any, image: Any) -> Any:
     hsv = cv2.cvtColor(resized, cv2.COLOR_BGR2HSV)
     hist = cv2.calcHist([hsv], [0, 1, 2], None, [18, 16, 8], [0, 180, 0, 256, 0, 256])
     cv2.normalize(hist, hist)
-    return hist
+    green_mask = cv2.inRange(hsv, (35, 30, 30), (95, 255, 255))
+    green_hist = cv2.calcHist([hsv], [0, 1], green_mask, [24, 16], [0, 180, 0, 256])
+    cv2.normalize(green_hist, green_hist)
+    return hist, green_hist
 
 
 def _extract_edge_vector(cv2: Any, image: Any) -> Any:
@@ -292,10 +347,12 @@ def _extract_item_feature(cv2: Any, image_path: Path, class_name: str) -> ItemFe
     if image is None:
         return None
     shape_vector, shape_label = _extract_shape_features(cv2, image)
+    color_hist, green_hist = _extract_color_hist(cv2, image)
     return ItemFeature(
         class_name=class_name,
         image_path=image_path,
-        color_hist=_extract_color_hist(cv2, image),
+        color_hist=color_hist,
+        green_hist=green_hist,
         edge_vector=_extract_edge_vector(cv2, image),
         shape_vector=shape_vector,
         shape_label=shape_label,
@@ -370,7 +427,12 @@ def _compare_features(cv2: Any, query: ItemFeature, reference: ItemFeature) -> M
     color_corr_score = max(0.0, min(1.0, (float(color_corr) + 1.0) / 2.0))
     color_distance = cv2.compareHist(query.color_hist, reference.color_hist, cv2.HISTCMP_BHATTACHARYYA)
     color_distance_score = max(0.0, min(1.0, 1.0 - float(color_distance)))
-    color_score = (color_corr_score * 0.35) + (color_distance_score * 0.65)
+    green_corr = cv2.compareHist(query.green_hist, reference.green_hist, cv2.HISTCMP_CORREL)
+    green_corr_score = max(0.0, min(1.0, (float(green_corr) + 1.0) / 2.0))
+    green_distance = cv2.compareHist(query.green_hist, reference.green_hist, cv2.HISTCMP_BHATTACHARYYA)
+    green_distance_score = max(0.0, min(1.0, 1.0 - float(green_distance)))
+    green_score = (green_corr_score * 0.45) + (green_distance_score * 0.55)
+    color_score = (color_corr_score * 0.27) + (color_distance_score * 0.43) + (green_score * 0.30)
     edge_score = _vector_shape_similarity(query.edge_vector, reference.edge_vector)
     shape_score = _cosine_similarity(query.shape_vector, reference.shape_vector)
     appearance_score = _cosine_similarity(query.appearance_vector, reference.appearance_vector)
@@ -437,13 +499,11 @@ def capture_product_image() -> tuple[Path | None, str]:
         return None, "攝影機無法開啟，請確認鏡頭是否被其他程式占用。"
 
     temp_file = Path(tempfile.gettempdir()) / "unmanned_store_product_scan.jpg"
-    start = time.time()
     try:
         while True:
             ok, frame = camera.read()
             if not ok:
                 return None, "攝影機讀取失敗。"
-            frame = cv2.flip(frame, 1)
             cv2.putText(
                 frame,
                 "Put item in view. SPACE scan, ESC cancel",
@@ -457,7 +517,7 @@ def capture_product_image() -> tuple[Path | None, str]:
             key = cv2.waitKey(1) & 0xFF
             if key == 27:
                 return None, "使用者取消商品掃描。"
-            if key == 32 or time.time() - start > 8:
+            if key == 32:
                 cv2.imwrite(str(temp_file), frame)
                 return temp_file, "已拍攝商品影像。"
     except Exception as exc:
@@ -505,9 +565,13 @@ def detect_from_image(image_path: Path) -> DetectionResult:
     if runner_up and margin < OPENCV_MIN_MARGIN:
         return DetectionResult(
             False,
+            class_name=best.class_name,
+            confidence=best.score,
             message=(
                 f"商品辨識不確定，第一名 {best.class_name} {best.score:.2f}，"
                 f"第二名 {runner_up.class_name} {runner_up.score:.2f}，差距 {margin:.2f}。\n"
+                f"第一名特徵值: {_format_detail(best.detail)}\n"
+                f"第二名特徵值: {_format_detail(runner_up.detail)}\n"
                 "這通常代表參考照片太少、角度太像，或背景干擾太高；請補拍更多角度後再掃描。"
             ),
         )
@@ -530,3 +594,72 @@ def scan_item() -> DetectionResult:
     if image_path is None:
         return DetectionResult(False, message=message)
     return detect_from_image(image_path)
+
+
+def capture_product_reference_photos(class_name: str, count: int = 6) -> tuple[bool, str, Path | None]:
+    cv2, error = _load_cv2()
+    if error:
+        return False, error, None
+
+    safe_class_name = class_name.strip()
+    if not safe_class_name:
+        return False, "class_name 不可為空。", None
+
+    target_folder = ITEM_ROOT / safe_class_name
+    target_folder.mkdir(parents=True, exist_ok=True)
+
+    prompts = [
+        "正面",
+        "左前 45 度",
+        "右前 45 度",
+        "左側",
+        "右側",
+        "俯視或傾斜",
+    ]
+    if count != 6:
+        prompts = [f"角度 {index + 1}" for index in range(count)]
+
+    camera = cv2.VideoCapture(0)
+    if not camera.isOpened():
+        camera.release()
+        cv2.destroyAllWindows()
+        return False, "攝影機無法開啟，請確認鏡頭是否被其他程式占用。", None
+
+    try:
+        for index in range(count):
+            while True:
+                ok, frame = camera.read()
+                if not ok:
+                    return False, "攝影機讀取失敗。", None
+                cv2.putText(
+                    frame,
+                    f"{prompts[index]}  SPACE拍照 ({index + 1}/{count})",
+                    (20, 45),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.8,
+                    (0, 255, 0),
+                    2,
+                )
+                cv2.putText(
+                    frame,
+                    "ESC 取消",
+                    (20, 80),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.7,
+                    (0, 255, 255),
+                    2,
+                )
+                cv2.imshow("商品建檔拍照 - ESC 取消", frame)
+                key = cv2.waitKey(1) & 0xFF
+                if key == 27:
+                    return False, "使用者取消商品拍照。", None
+                if key == 32:
+                    cv2.imwrite(str(target_folder / f"{index + 1}.jpg"), frame)
+                    break
+
+        return True, f"已完成 {count} 張商品參考照片拍攝。", target_folder
+    except Exception as exc:
+        return False, f"商品拍照流程發生錯誤: {exc}", None
+    finally:
+        camera.release()
+        cv2.destroyAllWindows()

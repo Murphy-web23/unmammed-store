@@ -3,30 +3,23 @@ from __future__ import annotations
 import sys
 import tkinter as tk
 from pathlib import Path
-from tkinter import messagebox, ttk
+from tkinter import messagebox, simpledialog, ttk
 
 if __package__ is None or __package__ == "":
     sys.path.append(str(Path(__file__).resolve().parent.parent))
 
 from unmanned_store.utils.checkout import Cart
 from unmanned_store.utils.face_recognizer import scan_member
-from unmanned_store.utils.item_detector import ITEM_ROOT, find_item_reference_root, scan_item
+from unmanned_store.utils.item_detector import find_item_reference_root, scan_item
+from unmanned_store.utils.admin_panel import AdminPanelWindow
 from unmanned_store.utils.member_manager import (
-    FACE_ROOT,
-    MEMBERS_CSV,
-    PROJECT_ROOT,
     Member,
     discount_label,
     ensure_member_files,
-    get_student_member,
-    read_members,
-    reset_demo_members,
 )
 from unmanned_store.utils.member_register import MemberRegisterWindow
 from unmanned_store.utils.product_manager import (
-    PRODUCTS_CSV,
     get_product_by_class,
-    list_class_names,
     read_products,
 )
 
@@ -35,16 +28,14 @@ class UnmannedStoreApp(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
         self.title("無人商店 AI 自助結帳系統")
-        self.geometry("920x640")
-        self.minsize(820, 560)
+        self.geometry("980x660")
+        self.minsize(920, 600)
 
         ensure_member_files()
         read_products()
 
         self.current_member = Member.non_member()
         self.cart = Cart()
-        self.product_index = 0
-
         self.name_var = tk.StringVar()
         self.level_var = tk.StringVar()
         self.discount_var = tk.StringVar()
@@ -60,11 +51,13 @@ class UnmannedStoreApp(tk.Tk):
         style = ttk.Style(self)
         style.configure("Title.TLabel", font=("Microsoft JhengHei UI", 16, "bold"))
         style.configure("Section.TLabelframe.Label", font=("Microsoft JhengHei UI", 11, "bold"))
+        style.configure("Action.TButton", font=("Microsoft JhengHei UI", 12, "bold"), padding=(10, 8))
+        style.configure("Danger.TButton", font=("Microsoft JhengHei UI", 10, "bold"), padding=(6, 2))
 
         root = ttk.Frame(self, padding=16)
         root.pack(fill="both", expand=True)
-        root.columnconfigure(0, weight=1)
-        root.columnconfigure(1, weight=1)
+        root.columnconfigure(0, weight=7)
+        root.columnconfigure(1, weight=5)
         root.rowconfigure(1, weight=1)
 
         ttk.Label(root, text="無人商店 AI 自助結帳系統", style="Title.TLabel").grid(
@@ -87,55 +80,42 @@ class UnmannedStoreApp(tk.Tk):
                 row=row, column=1, sticky="w", pady=5
             )
 
-        action_box = ttk.LabelFrame(member_box, text="正式操作", padding=10)
+        action_box = ttk.LabelFrame(member_box, text="操作", padding=12)
         action_box.grid(row=5, column=0, columnspan=2, sticky="ew", pady=(18, 8))
         for index in range(2):
             action_box.columnconfigure(index, weight=1)
-        ttk.Button(action_box, text="掃描會員", command=self.scan_member_flow).grid(
+        ttk.Button(action_box, text="掃描會員", command=self.scan_member_flow, style="Action.TButton").grid(
             row=0, column=0, sticky="ew", padx=4, pady=4
         )
-        ttk.Button(action_box, text="加入會員", command=self.open_register_window).grid(
+        ttk.Button(action_box, text="加入會員", command=self.open_register_window, style="Action.TButton").grid(
             row=0, column=1, sticky="ew", padx=4, pady=4
         )
-        ttk.Button(action_box, text="掃描商品", command=self.scan_item_flow).grid(
+        ttk.Button(action_box, text="掃描商品", command=self.scan_item_flow, style="Action.TButton").grid(
             row=1, column=0, sticky="ew", padx=4, pady=4
         )
-        ttk.Button(action_box, text="掃描完成 / 結帳", command=self.checkout_flow).grid(
+        ttk.Button(action_box, text="管理員操作", command=self.open_admin_panel, style="Action.TButton").grid(
             row=1, column=1, sticky="ew", padx=4, pady=4
         )
-        ttk.Button(action_box, text="清空購物車", command=self.clear_cart).grid(
-            row=2, column=0, columnspan=2, sticky="ew", padx=4, pady=4
+        ttk.Button(action_box, text="掃描完成 / 結帳", command=self.checkout_flow, style="Action.TButton").grid(
+            row=2, column=0, columnspan=2, sticky="ew", padx=4, pady=(10, 4)
         )
-
-        test_box = ttk.LabelFrame(member_box, text="測試模式", padding=10)
-        test_box.grid(row=6, column=0, columnspan=2, sticky="ew", pady=8)
-        for index in range(2):
-            test_box.columnconfigure(index, weight=1)
-        test_buttons = [
-            ("測試非會員", self.test_non_member),
-            ("測試學生會員", self.test_student_member),
-            ("測試一般會員", self.test_general_member),
-            ("測試加入商品", self.test_add_product),
-            ("檢查資料庫", self.check_database),
-            ("測試 Landmark 單次辨識", self.test_landmark_once),
-            ("測試 OpenCV 單次辨識", self.test_opencv_item_once),
-            ("重置現場會員", self.reset_demo_member_data),
-        ]
-        for index, (text, command) in enumerate(test_buttons):
-            ttk.Button(test_box, text=text, command=command).grid(
-                row=index // 2, column=index % 2, sticky="ew", padx=4, pady=4
-            )
 
         cart_box = ttk.LabelFrame(root, text="購物車", padding=12, style="Section.TLabelframe")
         cart_box.grid(row=1, column=1, sticky="nsew", padx=(8, 0))
         cart_box.rowconfigure(0, weight=1)
         cart_box.columnconfigure(0, weight=1)
 
-        self.cart_list = tk.Listbox(cart_box, font=("Microsoft JhengHei UI", 11), height=14)
-        self.cart_list.grid(row=0, column=0, sticky="nsew")
-        scrollbar = ttk.Scrollbar(cart_box, orient="vertical", command=self.cart_list.yview)
+        self.cart_canvas = tk.Canvas(cart_box, highlightthickness=0)
+        self.cart_canvas.grid(row=0, column=0, sticky="nsew")
+        scrollbar = ttk.Scrollbar(cart_box, orient="vertical", command=self.cart_canvas.yview)
         scrollbar.grid(row=0, column=1, sticky="ns")
-        self.cart_list.configure(yscrollcommand=scrollbar.set)
+        self.cart_canvas.configure(yscrollcommand=scrollbar.set)
+
+        self.cart_items_frame = ttk.Frame(self.cart_canvas)
+        self.cart_window = self.cart_canvas.create_window((0, 0), window=self.cart_items_frame, anchor="nw")
+        self.cart_items_frame.columnconfigure(0, weight=1)
+        self.cart_items_frame.bind("<Configure>", self._sync_cart_scroll)
+        self.cart_canvas.bind("<Configure>", self._resize_cart_content)
 
         totals = ttk.Frame(cart_box)
         totals.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(12, 0))
@@ -154,11 +134,46 @@ class UnmannedStoreApp(tk.Tk):
         self.refresh_cart()
 
     def refresh_cart(self) -> None:
-        self.cart_list.delete(0, tk.END)
-        for product in self.cart.items:
-            self.cart_list.insert(tk.END, f"{product.name}  ${product.price}")
+        for widget in self.cart_items_frame.winfo_children():
+            widget.destroy()
+
+        if not self.cart.items:
+            ttk.Label(self.cart_items_frame, text="購物車目前沒有商品", foreground="#666").grid(
+                row=0, column=0, sticky="w", padx=6, pady=8
+            )
+        else:
+            for index, product in enumerate(self.cart.items):
+                row = ttk.Frame(self.cart_items_frame, padding=(4, 2))
+                row.grid(row=index, column=0, sticky="ew", pady=2)
+                row.columnconfigure(0, weight=1)
+                row.columnconfigure(1, weight=0)
+                row.columnconfigure(2, weight=0)
+                ttk.Label(row, text=f"{product.name}").grid(row=0, column=0, sticky="w")
+
+                ttk.Label(row, text=f"${product.price}", anchor="e", width=8).grid(
+                    row=0, column=1, sticky="e", padx=(8, 10)
+                )
+                ttk.Button(
+                    row,
+                    text="刪除",
+                    command=lambda item_index=index: self.remove_cart_item(item_index),
+                    style="Danger.TButton",
+                ).grid(row=0, column=2, sticky="e")
+
+        self.cart_items_frame.update_idletasks()
+        self.cart_canvas.configure(scrollregion=self.cart_canvas.bbox("all"))
         self.original_total_var.set(f"{self.cart.original_total()} 元")
         self.discounted_total_var.set(f"{self.cart.discounted_total(self.current_member.discount)} 元")
+
+    def _sync_cart_scroll(self, _event=None) -> None:
+        self.cart_canvas.configure(scrollregion=self.cart_canvas.bbox("all"))
+
+    def _resize_cart_content(self, event) -> None:
+        self.cart_canvas.itemconfig(self.cart_window, width=event.width)
+
+    def remove_cart_item(self, index: int) -> None:
+        self.cart.remove_item(index)
+        self.refresh_cart()
 
     def scan_member_flow(self) -> None:
         result = scan_member()
@@ -182,6 +197,23 @@ class UnmannedStoreApp(tk.Tk):
     def scan_item_flow(self) -> None:
         result = scan_item()
         if not result.success:
+            if result.class_name:
+                candidate_product = get_product_by_class(result.class_name)
+                if candidate_product:
+                    confirmed = messagebox.askyesno(
+                        "商品辨識不確定",
+                        (
+                            f"{result.message}\n\n"
+                            f"候選商品: {candidate_product.name}\n"
+                            f"候選價格: {candidate_product.price} 元\n"
+                            f"候選信心度: {result.confidence:.2f}\n\n"
+                            "是否仍要加入購物車？"
+                        ),
+                    )
+                    if confirmed:
+                        self.cart.add_item(candidate_product)
+                        self.refresh_cart()
+                    return
             messagebox.showwarning("商品辨識失敗", result.message)
             return
 
@@ -205,132 +237,31 @@ class UnmannedStoreApp(tk.Tk):
         if not self.cart.items:
             messagebox.showwarning("購物車是空的", "請先加入商品再結帳。")
             return
-        messagebox.showinfo("結帳結果", self.cart.checkout_message(self.current_member))
-
-    def clear_cart(self) -> None:
+        checkout_text = "\n".join(
+            [
+                self.cart.checkout_message(self.current_member),
+                "",
+                "謝謝光臨，歡迎下次再來！",
+            ]
+        )
+        messagebox.showinfo("結帳結果", checkout_text)
         self.cart.clear()
         self.refresh_cart()
 
-    def test_non_member(self) -> None:
-        self.set_member(Member.non_member(), "查無會員資料，目前以非會員身份結帳")
-
-    def test_student_member(self) -> None:
-        member = get_student_member()
-        if not member:
-            messagebox.showwarning("找不到學生會員", "members.csv 找不到學生會員示範者。")
+    def open_admin_panel(self) -> None:
+        password = simpledialog.askstring("管理員驗證", "請輸入管理員密碼", show="*", parent=self)
+        if password is None:
             return
-        self.set_member(member, "測試模式: 學生會員")
-
-    def test_general_member(self) -> None:
-        member = Member("TEST_GENERAL", "一般會員示範者", "一般會員", 0.9, "")
-        self.set_member(member, "測試模式: 一般會員")
-
-    def test_add_product(self) -> None:
-        products = read_products()
-        if not products:
-            messagebox.showwarning("沒有商品資料", "products.csv 沒有可加入的商品。")
+        if password != "1234":
+            messagebox.showerror("驗證失敗", "密碼錯誤。")
             return
-        product = products[self.product_index % len(products)]
-        self.product_index += 1
-        self.cart.add_item(product)
-        self.refresh_cart()
-
-    def check_database(self) -> None:
-        lines = [
-            f"members.csv: {'存在' if MEMBERS_CSV.exists() else '不存在'}",
-            f"products.csv: {'存在' if PRODUCTS_CSV.exists() else '不存在'}",
-            f"src/face/: {'存在' if FACE_ROOT.exists() else '不存在'}",
-            "",
-            "會員照片資料:",
-        ]
-        for member in read_members():
-            folder = Path(member.face_folder)
-            if not folder.is_absolute():
-                folder = (PROJECT_ROOT / member.face_folder).resolve()
-            image_count = 0
-            if folder.exists():
-                image_count = len(list(folder.glob("*.jpg"))) + len(list(folder.glob("*.png")))
-            lines.append(f"- {member.member_id} {member.name}: {folder} / {image_count} 張")
-
-        item_lines = []
-        if ITEM_ROOT.exists():
-            for folder in sorted(ITEM_ROOT.iterdir()):
-                if folder.is_dir():
-                    count = (
-                        len(list(folder.glob("*.jpg")))
-                        + len(list(folder.glob("*.jpeg")))
-                        + len(list(folder.glob("*.png")))
-                        + len(list(folder.glob("*.JPG")))
-                        + len(list(folder.glob("*.JPEG")))
-                        + len(list(folder.glob("*.PNG")))
-                    )
-                    item_lines.append(f"- {folder.name}: {count} 張")
-        lines.extend(
-            [
-                "",
-                f"src/item/: {'存在' if ITEM_ROOT.exists() else '不存在'}",
-                "商品參考照片:",
-                *(item_lines or ["沒有商品參考照片"]),
-                "",
-                "products.csv class_name:",
-                ", ".join(list_class_names()) or "沒有商品 class_name",
-            ]
-        )
-        messagebox.showinfo("資料庫檢查", "\n".join(lines))
-
-    def test_landmark_once(self) -> None:
-        result = scan_member()
-        if result.success and result.member:
-            messagebox.showinfo(
-                "Landmark 單次辨識",
-                "\n".join(
-                    [
-                        "辨識成功",
-                        f"找到圖片: {result.identity_path}",
-                        f"會員: {result.member.name}",
-                        f"會員等級: {result.member.level}",
-                    ]
-                ),
-            )
-        else:
-            messagebox.showwarning("Landmark 單次辨識", f"辨識失敗\n原因: {result.message}")
-
-    def test_opencv_item_once(self) -> None:
-        result = scan_item()
-        if not result.success:
-            messagebox.showwarning("OpenCV 單次辨識", result.message)
-            return
-        product = get_product_by_class(result.class_name)
-        if product:
-            messagebox.showinfo(
-                "OpenCV 單次辨識",
-                f"class_name: {result.class_name}\nconfidence: {result.confidence:.2f}\n對應商品: {product.name} / {product.price} 元",
-            )
-        else:
-            messagebox.showwarning(
-                "OpenCV 單次辨識",
-                f"class_name: {result.class_name}\nconfidence: {result.confidence:.2f}\n此 class_name 尚未建檔",
-            )
-
-    def reset_demo_member_data(self) -> None:
-        confirm = messagebox.askyesno(
-            "重置現場會員",
-            "將刪除 members.csv 中非 M001 的會員，並刪除 src/face/general_member_ 開頭資料夾。\n\n確定要重置嗎？",
-        )
-        if not confirm:
-            return
-        removed_members, removed_folders = reset_demo_members()
-        self.set_member(Member.non_member(), "已重置現場會員資料")
-        messagebox.showinfo(
-            "重置完成",
-            f"已刪除 {removed_members} 筆現場會員資料與 {removed_folders} 個照片資料夾。",
-        )
+        AdminPanelWindow(self, on_data_changed=self.refresh_cart)
 
 
 def main() -> None:
     app = UnmannedStoreApp()
     if find_item_reference_root() is None:
-        app.status_var.set("尚未掃描會員；提醒: 找不到 src/item 商品參考照片，掃描商品可先用測試加入商品備援")
+        app.status_var.set("尚未掃描會員；提醒: 找不到 src/item 商品參考照片，請先由管理員新增商品並拍攝參考照片")
     app.mainloop()
 
 

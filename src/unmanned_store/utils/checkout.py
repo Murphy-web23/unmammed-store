@@ -18,6 +18,12 @@ class Cart:
     def add_item(self, product: Product) -> None:
         self.items.append(product)
 
+    def remove_item(self, index: int) -> bool:
+        if index < 0 or index >= len(self.items):
+            return False
+        del self.items[index]
+        return True
+
     def clear(self) -> None:
         self.items.clear()
 
