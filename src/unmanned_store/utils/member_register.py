@@ -5,6 +5,9 @@ import tkinter as tk
 from pathlib import Path
 from tkinter import messagebox, ttk
 
+import numpy as np
+from PIL import Image, ImageDraw, ImageFont
+
 from .member_manager import LEVEL_DISCOUNTS, add_member, next_general_face_folder
 
 
@@ -17,19 +20,45 @@ def _load_cv2():
         return None, f"OpenCV 載入失敗: {exc}"
 
 
+def _load_cjk_font(size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
+    font_candidates = [
+        Path("C:/Windows/Fonts/msjh.ttc"),
+        Path("C:/Windows/Fonts/msjhbd.ttc"),
+        Path("C:/Windows/Fonts/simsun.ttc"),
+        Path("/System/Library/Fonts/PingFang.ttc"),
+        Path("/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc"),
+    ]
+    for font_path in font_candidates:
+        if font_path.exists():
+            try:
+                return ImageFont.truetype(str(font_path), size=size)
+            except Exception:
+                continue
+    return ImageFont.load_default()
+
+
+def _draw_text(
+    cv2,
+    frame: np.ndarray,
+    text: str,
+    position: tuple[int, int],
+    color: tuple[int, int, int],
+    size: int,
+) -> np.ndarray:
+    # OpenCV putText 不支援中文，改用 Pillow 確保提示文字可正確顯示。
+    rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    image = Image.fromarray(rgb)
+    draw = ImageDraw.Draw(image)
+    font = _load_cjk_font(size)
+    draw.text(position, text, font=font, fill=(color[2], color[1], color[0]))
+    return cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
+
+
 def _show_completion(cv2, frame, text: str, duration: float = 1.2) -> None:
     start = time.time()
     while time.time() - start < duration:
         display = frame.copy()
-        cv2.putText(
-            display,
-            text,
-            (30, 110),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            1,
-            (0, 200, 255),
-            2,
-        )
+        display = _draw_text(cv2, display, text, (30, 85), (0, 200, 255), 36)
         cv2.imshow("加入會員拍照 - ESC 取消", display)
         if cv2.waitKey(1) & 0xFF == 27:
             break
@@ -57,24 +86,8 @@ def capture_member_photos(target_folder: Path, count: int = 3) -> tuple[bool, st
                     return False, "攝影機讀取失敗。"
                 frame = cv2.flip(frame, 1)
                 text = f"{prompts[index]}  SPACE拍照 ({index + 1}/{count})"
-                cv2.putText(
-                    frame,
-                    text,
-                    (30, 60),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.8,
-                    (0, 255, 0),
-                    2,
-                )
-                cv2.putText(
-                    frame,
-                    "ESC 取消",
-                    (30, 95),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.7,
-                    (0, 255, 255),
-                    2,
-                )
+                frame = _draw_text(cv2, frame, text, (30, 30), (0, 255, 0), 30)
+                frame = _draw_text(cv2, frame, "ESC 取消", (30, 70), (0, 255, 255), 28)
                 cv2.imshow("加入會員拍照 - ESC 取消", frame)
                 key = cv2.waitKey(1) & 0xFF
                 if key == 27:

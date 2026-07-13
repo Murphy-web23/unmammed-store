@@ -27,7 +27,7 @@ from unmanned_store.utils.product_manager import (
 class UnmannedStoreApp(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
-        self.title("無人商店 AI 自助結帳系統")
+        self.title("自助結帳系統")
         self.geometry("980x660")
         self.minsize(920, 600)
 
@@ -60,7 +60,7 @@ class UnmannedStoreApp(tk.Tk):
         root.columnconfigure(1, weight=5)
         root.rowconfigure(1, weight=1)
 
-        ttk.Label(root, text="無人商店 AI 自助結帳系統", style="Title.TLabel").grid(
+        ttk.Label(root, text="自助結帳系統", style="Title.TLabel").grid(
             row=0, column=0, columnspan=2, sticky="w", pady=(0, 12)
         )
 

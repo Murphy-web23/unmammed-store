@@ -58,3 +58,74 @@ CLAHE 全名是 Contrast Limited Adaptive Histogram Equalization。
 - 辨色能力針對綠色系做強化
 - 管理功能可支援資料長期維運
 可作為課堂專題展示與後續迭代的基礎。
+
+13. 最新優化歷程（2026-07-13）
+- 原本 CLAHE 先套用在 LAB 的 L 通道，雖然有改善，但在特定光線下仍不足。
+- 已改為在 HSV 色彩空間的 V（亮度）通道做 CLAHE，再回轉 BGR 供後續特徵抽取，讓亮度不均時的辨識穩定性更好。
+- 會員加入拍照流程中，原本 OpenCV `putText` 顯示中文會出現亂碼，已改成 Pillow + 支援中日韓字型繪字，提示文字可正常顯示。
+- 為避免上傳 Git 後 clone 出現編碼混亂，新增 `.editorconfig` 與 `.gitattributes`，統一文字檔使用 UTF-8 與 LF。
+
+14. 最新優化歷程（雨傘 vs 水壺 / 蒂芬妮綠分辨）
+- 為避免雨傘誤判為水壺，新增 Canny 幾何後處理規則，萃取 ROI 邊緣密度、寬高比、邊緣填充率，對 umbrella 與 bottle 類別分數進行抑制/加權。
+- 當候選結果涉及雨傘類別時，系統會對 ROI 執行嚴格蒂芬妮綠判斷流程：
+	1) BGR 轉 HSV（`cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)`）
+	2) 使用極窄蒂芬妮綠區間遮罩（Lower `[75,100,100]`、Upper `[95,255,255]`）
+	3) 以 `cv2.countNonZero` 計算符合像素數
+	4) 計算顏色佔比 `(符合像素/ROI總像素)*100`
+- 上述佔比已作為 umbrella_tiffany 與 umbrella_green 的顏色分辨依據，並回寫到最終排名分數。
+
+15. 參考資料夾數據後的辨色參數校正（降低偏綠）
+- 以 `src/item/umbrella_tiffany` 與 `src/item/umbrella_green` 的參考影像實測蒂芬妮綠佔比：
+	- umbrella_tiffany：約 `0.00% ~ 4.32%`（可辨識樣本常見 `2.22% ~ 4.32%`）
+	- umbrella_green：約 `0.00% ~ 0.03%`
+- 依此將原本過高且偏綠的單一門檻改成三段式：
+	- `<= 0.05%`：視為雜訊上限，只給 very small green 偏好
+	- `>= 0.12%`：給予 tiffany 中度加權
+	- `>= 0.90%`：給予 tiffany 強加權
+- 這樣可避免「沒有明顯蒂芬妮綠訊號時就大幅偏 green」的情況，並在出現有效訊號時更積極拉向 umbrella_tiffany。
+
+16. 本次調整歷程與解法總結（2026-07-13）
+- 問題 1：雨傘可能被誤判為水壺。
+  解法：新增 Canny 幾何規則，使用 ROI 的邊緣密度、寬高比、邊緣填充率抑制 bottle 類別誤判。
+- 問題 2：umbrella_tiffany 與 umbrella_green 辨色偏向 green。
+  解法：對 `src/item/umbrella_tiffany`、`src/item/umbrella_green` 做實測統計，再以數據回調蒂芬妮綠佔比門檻與加權幅度。
+- 問題 3：不確定辨識時提示資訊過多（顯示排名與第二名）。
+  解法：改為只顯示「最可能商品」與信心度，不再顯示排名比較，讓使用者決策更直覺。
+17. 用到的技術整理
+- 程式語言與執行環境
+	- Python 3（專案主要開發語言）
+	- 虛擬環境（venv）管理套件與執行環境一致性
+
+- 介面與互動
+	- Tkinter / ttk（桌面 GUI 介面）
+	- messagebox、對話框、按鈕事件流程控制
+
+- 會員辨識技術
+	- MediaPipe Face Landmark（人臉關鍵點）
+	- 臉部特徵向量比對（landmark + appearance 組合距離）
+
+- 商品辨識技術（OpenCV）
+	- 色彩空間轉換：BGR / HSV / LAB
+	- 光照與顏色前處理：Dynamic Color Balancing、CLAHE（目前使用 HSV 的 V 通道）
+	- 顏色特徵：HSV 直方圖、綠色遮罩直方圖
+	- 幾何與邊緣特徵：Canny、邊緣向量、形狀向量
+	- 局部特徵：ORB 描述子 + BFMatcher
+	- 前景擷取：閾值遮罩 + 形態學運算（Open/Close）+ 輪廓框選 ROI
+	- 分類決策：多特徵加權評分 + Top-N 參考圖彙整 + 不確定情境處理
+
+- 顏色規則強化（雨傘分辨）
+	- 雨傘 ROI 蒂芬妮綠嚴格區間遮罩（HSV Lower [75,100,100] / Upper [95,255,255]）
+	- `cv2.inRange` + `cv2.countNonZero` 計算顏色佔比
+	- 以資料統計結果校正門檻，降低偏向 green 的誤判
+
+- 影像文字與顯示
+	- Pillow（PIL）繪製中文提示文字，解決 OpenCV `putText` 中文亂碼
+
+- 資料與檔案管理
+	- CSV（members/products）作為輕量資料儲存
+	- pathlib / dataclass 管理檔案路徑與資料結構
+
+- 版本控制與編碼一致性
+	- Git
+	- `.editorconfig`（統一 UTF-8、LF）
+	- `.gitattributes`（文字檔行尾與編碼策略，降低 clone 後亂碼風險）

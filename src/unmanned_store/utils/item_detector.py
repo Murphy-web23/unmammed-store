@@ -23,6 +23,15 @@ SHAPE_WEIGHT = 0.18
 APPEARANCE_WEIGHT = 0.2
 ORB_WEIGHT = 0.1
 ITEM_SCAN_WINDOW = "item_scan"
+UMBRELLA_CLASSES = {"umbrella_green", "umbrella_tiffany"}
+BOTTLE_CLASSES = {"owala", "asahi"}
+TIFFANY_HSV_LOWER = (75, 100, 100)
+TIFFANY_HSV_UPPER = (95, 255, 255)
+# 依 src/item 統計校正：umbrella_green 幾乎不超過 0.03%，
+# umbrella_tiffany 在可辨識樣本約落在 2.22%~4.32%。
+TIFFANY_RATIO_NOISE_CEILING_PERCENT = 0.05
+TIFFANY_RATIO_SOFT_THRESHOLD_PERCENT = 0.12
+TIFFANY_RATIO_STRONG_THRESHOLD_PERCENT = 0.90
 
 
 @dataclass
@@ -63,6 +72,15 @@ class ClassMatch:
     score: float
     reference_path: Path
     detail: MatchScore
+
+
+@dataclass
+class RefinementContext:
+    canny_density: float
+    canny_aspect: float
+    canny_fill: float
+    tiffany_ratio_percent: float
+    applied: bool
 
 
 def find_item_reference_root() -> Path | None:
@@ -164,13 +182,13 @@ def _dynamic_color_balance(cv2: Any, image: Any) -> Any:
 
 
 def _apply_clahe_lighting(cv2: Any, image: Any) -> Any:
-    # CLAHE: 在 LAB 的 L 通道做局部對比增強，提升暗光下可辨識細節。
-    lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB)
-    l_channel, a_channel, b_channel = cv2.split(lab)
+    # CLAHE: 改在 HSV 的 V 通道做局部對比增強，降低亮度不均造成的辨識誤差。
+    hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+    h_channel, s_channel, v_channel = cv2.split(hsv)
     clahe = cv2.createCLAHE(clipLimit=2.4, tileGridSize=(8, 8))
-    l_enhanced = clahe.apply(l_channel)
-    merged = cv2.merge((l_enhanced, a_channel, b_channel))
-    return cv2.cvtColor(merged, cv2.COLOR_LAB2BGR)
+    v_enhanced = clahe.apply(v_channel)
+    merged = cv2.merge((h_channel, s_channel, v_enhanced))
+    return cv2.cvtColor(merged, cv2.COLOR_HSV2BGR)
 
 
 def _enhance_hsv_green_separation(cv2: Any, image: Any) -> Any:
@@ -487,6 +505,123 @@ def _format_detail(detail: MatchScore) -> str:
     )
 
 
+def _tiffany_ratio_percent_from_roi(cv2: Any, roi: Any) -> float:
+    import numpy as np
+
+    if roi is None or getattr(roi, "size", 0) == 0:
+        return 0.0
+
+    hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+    lower = np.array(TIFFANY_HSV_LOWER, dtype=np.uint8)
+    upper = np.array(TIFFANY_HSV_UPPER, dtype=np.uint8)
+    mask = cv2.inRange(hsv, lower, upper)
+    matched_pixels = int(cv2.countNonZero(mask))
+    total_pixels = int(roi.shape[0] * roi.shape[1])
+    if total_pixels <= 0:
+        return 0.0
+    return (matched_pixels / total_pixels) * 100.0
+
+
+def _canny_geometry_signature(cv2: Any, roi: Any) -> tuple[float, float, float]:
+    if roi is None or getattr(roi, "size", 0) == 0:
+        return 0.0, 0.0, 0.0
+
+    gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+    gray = cv2.GaussianBlur(gray, (5, 5), 0)
+    edges = cv2.Canny(gray, 55, 150)
+
+    total_pixels = max(1, roi.shape[0] * roi.shape[1])
+    edge_pixels = int(cv2.countNonZero(edges))
+    edge_density = edge_pixels / float(total_pixels)
+
+    ys, xs = edges.nonzero()
+    if len(xs) == 0 or len(ys) == 0:
+        return edge_density, 0.0, 0.0
+
+    left, right = int(xs.min()), int(xs.max())
+    top, bottom = int(ys.min()), int(ys.max())
+    width = max(1, right - left + 1)
+    height = max(1, bottom - top + 1)
+    aspect_ratio = width / float(height)
+    fill_ratio = edge_pixels / float(width * height)
+    return edge_density, aspect_ratio, fill_ratio
+
+
+def _apply_rule_refinement(
+    cv2: Any,
+    image_path: Path,
+    ranked: list[ClassMatch],
+) -> tuple[list[ClassMatch], RefinementContext]:
+    if not ranked:
+        return ranked, RefinementContext(0.0, 0.0, 0.0, 0.0, False)
+
+    image = cv2.imread(str(image_path))
+    if image is None:
+        return ranked, RefinementContext(0.0, 0.0, 0.0, 0.0, False)
+
+    roi = _prepared_image(cv2, image, max_size=640)
+    edge_density, aspect_ratio, fill_ratio = _canny_geometry_signature(cv2, roi)
+    tiffany_ratio = _tiffany_ratio_percent_from_roi(cv2, roi)
+
+    top_names = {item.class_name for item in ranked[:3]}
+    has_umbrella_candidate = bool(top_names & UMBRELLA_CLASSES)
+    has_bottle_candidate = bool(top_names & BOTTLE_CLASSES)
+
+    score_delta: dict[str, float] = {item.class_name: 0.0 for item in ranked}
+
+    # 使用 Canny 幾何訊號抑制「雨傘誤判為水壺」：偏寬或邊緣分布較散時，不利於瓶身類。
+    umbrella_like = (aspect_ratio >= 0.92 and edge_density >= 0.075) or (fill_ratio >= 0.18)
+    bottle_like = (aspect_ratio <= 0.72 and edge_density <= 0.072 and fill_ratio <= 0.14)
+    if has_umbrella_candidate and has_bottle_candidate and umbrella_like:
+        for class_name in BOTTLE_CLASSES:
+            if class_name in score_delta:
+                score_delta[class_name] -= 0.09
+        for class_name in UMBRELLA_CLASSES:
+            if class_name in score_delta:
+                score_delta[class_name] += 0.03
+    elif has_umbrella_candidate and has_bottle_candidate and bottle_like:
+        for class_name in UMBRELLA_CLASSES:
+            if class_name in score_delta:
+                score_delta[class_name] -= 0.06
+        for class_name in BOTTLE_CLASSES:
+            if class_name in score_delta:
+                score_delta[class_name] += 0.03
+
+    # 雨傘 ROI 顏色分辨：使用蒂芬妮綠極窄 HSV 區間佔比作為 umbrella_green / umbrella_tiffany 判斷依據。
+    if has_umbrella_candidate:
+        if tiffany_ratio >= TIFFANY_RATIO_STRONG_THRESHOLD_PERCENT:
+            if "umbrella_tiffany" in score_delta:
+                score_delta["umbrella_tiffany"] += 0.18
+            if "umbrella_green" in score_delta:
+                score_delta["umbrella_green"] -= 0.13
+        elif tiffany_ratio >= TIFFANY_RATIO_SOFT_THRESHOLD_PERCENT:
+            if "umbrella_tiffany" in score_delta:
+                score_delta["umbrella_tiffany"] += 0.10
+            if "umbrella_green" in score_delta:
+                score_delta["umbrella_green"] -= 0.07
+        elif tiffany_ratio <= TIFFANY_RATIO_NOISE_CEILING_PERCENT:
+            # 低於雜訊上限僅做很小幅 green 偏好，避免預設過度偏綠。
+            if "umbrella_green" in score_delta:
+                score_delta["umbrella_green"] += 0.02
+            if "umbrella_tiffany" in score_delta:
+                score_delta["umbrella_tiffany"] -= 0.01
+
+    if all(abs(delta) < 1e-9 for delta in score_delta.values()):
+        return ranked, RefinementContext(edge_density, aspect_ratio, fill_ratio, tiffany_ratio, False)
+
+    refined = [
+        ClassMatch(
+            class_name=item.class_name,
+            score=max(0.0, min(1.0, item.score + score_delta.get(item.class_name, 0.0))),
+            reference_path=item.reference_path,
+            detail=item.detail,
+        )
+        for item in ranked
+    ]
+    refined.sort(key=lambda item: item.score, reverse=True)
+    return refined, RefinementContext(edge_density, aspect_ratio, fill_ratio, tiffany_ratio, True)
+
+
 def capture_product_image() -> tuple[Path | None, str]:
     cv2, error = _load_cv2()
     if error:
@@ -547,9 +682,20 @@ def detect_from_image(image_path: Path) -> DetectionResult:
     if not ranked:
         return DetectionResult(False, message="src/item/ 沒有可用的商品參考照片。")
 
+    ranked, refinement = _apply_rule_refinement(cv2, image_path, ranked)
+
     best = ranked[0]
     runner_up = ranked[1] if len(ranked) > 1 else None
     margin = best.score - (runner_up.score if runner_up else 0.0)
+    refinement_note = ""
+    if refinement.applied:
+        refinement_note = (
+            "\n規則修正: "
+            f"Canny密度 {refinement.canny_density:.3f}, "
+            f"寬高比 {refinement.canny_aspect:.2f}, "
+            f"邊緣填充 {refinement.canny_fill:.3f}, "
+            f"蒂芬妮綠佔比 {refinement.tiffany_ratio_percent:.2f}%"
+        )
 
     if best.score < OPENCV_MATCH_THRESHOLD:
         return DetectionResult(
@@ -559,6 +705,7 @@ def detect_from_image(image_path: Path) -> DetectionResult:
                 f"{OPENCV_MATCH_THRESHOLD:.2f}。\n"
                 f"第一名: {best.class_name} ({_format_detail(best.detail)})\n"
                 "請讓商品置中、靠近鏡頭，背景保持單純後重新掃描。"
+                f"{refinement_note}"
             ),
         )
 
@@ -568,11 +715,9 @@ def detect_from_image(image_path: Path) -> DetectionResult:
             class_name=best.class_name,
             confidence=best.score,
             message=(
-                f"商品辨識不確定，第一名 {best.class_name} {best.score:.2f}，"
-                f"第二名 {runner_up.class_name} {runner_up.score:.2f}，差距 {margin:.2f}。\n"
-                f"第一名特徵值: {_format_detail(best.detail)}\n"
-                f"第二名特徵值: {_format_detail(runner_up.detail)}\n"
-                "這通常代表參考照片太少、角度太像，或背景干擾太高；請補拍更多角度後再掃描。"
+                f"商品辨識不確定，目前最可能是: {best.class_name}（信心度 {best.score:.2f}）。\n"
+                "請嘗試讓商品更置中、降低背景干擾，或補拍更多參考角度後再掃描。"
+                f"{refinement_note}"
             ),
         )
 
@@ -584,6 +729,7 @@ def detect_from_image(image_path: Path) -> DetectionResult:
             f"OpenCV 商品辨識成功，分數 {best.score:.2f}。\n"
             f"{_format_detail(best.detail)}\n"
             f"參考圖: {best.reference_path}"
+            f"{refinement_note}"
         ),
         model_path=str(ITEM_ROOT),
     )
