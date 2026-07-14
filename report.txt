@@ -33,10 +33,6 @@
 - HSV 綠色區間強化
 此外新增綠色遮罩直方圖，讓顏色分數不只看整體色彩，也看綠色細節分布。
 
-8. CLAHE 是什麼
-CLAHE 全名是 Contrast Limited Adaptive Histogram Equalization。
-它會把影像切成很多小區塊，各自做局部對比增強，再限制過度放大的對比（clip limit），避免噪點被放大太嚴重。
-在本專案中，CLAHE 用於 LAB 色彩空間的 L（亮度）通道，可在低光環境下提升局部細節，讓顏色和紋理特徵更容易被辨識模組分開。
 
 9. 系統管理面補強
 新增管理員操作，支援會員與商品資料增刪修，並能在新增商品時不同角度參考照片，強化資料庫品質。
@@ -83,6 +79,7 @@ CLAHE 全名是 Contrast Limited Adaptive Histogram Equalization。
 	- `>= 0.12%`：給予 tiffany 中度加權
 	- `>= 0.90%`：給予 tiffany 強加權
 - 這樣可避免「沒有明顯蒂芬妮綠訊號時就大幅偏 green」的情況，並在出現有效訊號時更積極拉向 umbrella_tiffany。
+至此解決顏色相近商品問題
 
 16. 本次調整歷程與解法總結（2026-07-13）
 - 問題 1：雨傘可能被誤判為水壺。
@@ -91,6 +88,7 @@ CLAHE 全名是 Contrast Limited Adaptive Histogram Equalization。
   解法：對 `src/item/umbrella_tiffany`、`src/item/umbrella_green` 做實測統計，再以數據回調蒂芬妮綠佔比門檻與加權幅度。
 - 問題 3：不確定辨識時提示資訊過多（顯示排名與第二名）。
   解法：改為只顯示「最可能商品」與信心度，不再顯示排名比較，讓使用者決策更直覺。
+  
 17. 用到的技術整理
 - 程式語言與執行環境
 	- Python 3（專案主要開發語言）
