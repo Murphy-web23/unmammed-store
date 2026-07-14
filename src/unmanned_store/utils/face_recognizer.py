@@ -97,7 +97,6 @@ def capture_face_image() -> tuple[Path | None, str]:
         return None, "攝影機無法開啟，請確認鏡頭是否被其他程式占用。"
 
     temp_file = Path(tempfile.gettempdir()) / "unmanned_store_face_scan.jpg"
-    start = time.time()
     try:
         while True:
             ok, frame = camera.read()
@@ -117,7 +116,7 @@ def capture_face_image() -> tuple[Path | None, str]:
             key = cv2.waitKey(1) & 0xFF
             if key == 27:
                 return None, "使用者取消掃描。"
-            if key == 32 or time.time() - start > 8:
+            if key == 32:
                 cv2.imwrite(str(temp_file), frame)
                 return temp_file, "已拍攝人臉影像。"
     except Exception as exc:

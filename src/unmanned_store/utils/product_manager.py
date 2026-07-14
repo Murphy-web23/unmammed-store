@@ -60,6 +60,65 @@ def read_products() -> list[Product]:
     return products
 
 
+def write_products(products: list[Product]) -> None:
+    ensure_product_file()
+    with PRODUCTS_CSV.open("w", encoding="utf-8-sig", newline="") as file:
+        writer = csv.DictWriter(
+            file,
+            fieldnames=["product_id", "name", "price", "class_name"],
+        )
+        writer.writeheader()
+        for product in products:
+            writer.writerow(
+                {
+                    "product_id": product.product_id,
+                    "name": product.name,
+                    "price": str(product.price),
+                    "class_name": product.class_name,
+                }
+            )
+
+
+def next_product_id() -> str:
+    max_number = 0
+    for product in read_products():
+        if product.product_id.startswith("P") and product.product_id[1:].isdigit():
+            max_number = max(max_number, int(product.product_id[1:]))
+    return f"P{max_number + 1:03d}"
+
+
+def add_product(name: str, price: int, class_name: str) -> Product:
+    products = read_products()
+    product = Product(
+        product_id=next_product_id(),
+        name=name.strip(),
+        price=int(price),
+        class_name=class_name.strip(),
+    )
+    products.append(product)
+    write_products(products)
+    return product
+
+
+def update_product(updated: Product) -> bool:
+    products = read_products()
+    for index, product in enumerate(products):
+        if product.product_id == updated.product_id:
+            products[index] = updated
+            write_products(products)
+            return True
+    return False
+
+
+def delete_product(product_id: str) -> bool:
+    products = read_products()
+    kept = [product for product in products if product.product_id != product_id]
+    if len(kept) == len(products):
+        return False
+    write_products(kept)
+    return True
+
+
 def get_product_by_class(class_name: str) -> Product | None:
     target = class_name.strip()
     for product in read_products():

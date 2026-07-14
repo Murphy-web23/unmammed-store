@@ -11,41 +11,37 @@ if __package__ is None or __package__ == "":
 from unmanned_store.utils.checkout import Cart
 from unmanned_store.utils.face_recognizer import scan_member
 from unmanned_store.utils.item_detector import find_item_reference_root, scan_item
+from unmanned_store.utils.admin_panel import AdminPanelWindow
 from unmanned_store.utils.member_manager import (
     Member,
     discount_label,
     ensure_member_files,
 )
 from unmanned_store.utils.member_register import MemberRegisterWindow
-from unmanned_store.utils.product_manager import ProductManagerWindow, get_product_by_class
-
-
-# 想讓購物車商品欄更矮：把這個數字調小，例如 6、5、4。
-CART_LIST_HEIGHT = 7
-# 想讓整個主頁面往下移：把這個數字調大，例如 16 或 24。
-PAGE_TOP_OFFSET = 18
+from unmanned_store.utils.product_manager import (
+    get_product_by_class,
+    read_products,
+)
 
 
 class UnmannedStoreApp(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
-        self.title("無人商店 AI 自助結帳系統")
-        self.geometry("860x560")
-        self.minsize(760, 500)
+        self.title("自助結帳系統")
+        self.geometry("980x660")
+        self.minsize(920, 600)
 
         ensure_member_files()
+        read_products()
 
         self.current_member = Member.non_member()
         self.cart = Cart()
-        self.product_manager_window: ProductManagerWindow | None = None
-
         self.name_var = tk.StringVar()
         self.level_var = tk.StringVar()
         self.discount_var = tk.StringVar()
         self.status_var = tk.StringVar()
         self.original_total_var = tk.StringVar()
         self.discounted_total_var = tk.StringVar()
-        self.cart_selection_var = tk.StringVar(value="選取商品後可按刪除 × 移除單項")
 
         self._build_ui()
         self.set_member(Member.non_member(), "尚未掃描會員")
@@ -53,21 +49,22 @@ class UnmannedStoreApp(tk.Tk):
 
     def _build_ui(self) -> None:
         style = ttk.Style(self)
-        style.configure("Title.TLabel", font=("Microsoft JhengHei UI", 14, "bold"))
-        style.configure("Section.TLabelframe.Label", font=("Microsoft JhengHei UI", 10, "bold"))
-        style.configure("Action.TButton", padding=(10, 8))
+        style.configure("Title.TLabel", font=("Microsoft JhengHei UI", 16, "bold"))
+        style.configure("Section.TLabelframe.Label", font=("Microsoft JhengHei UI", 11, "bold"))
+        style.configure("Action.TButton", font=("Microsoft JhengHei UI", 12, "bold"), padding=(10, 8))
+        style.configure("Danger.TButton", font=("Microsoft JhengHei UI", 10, "bold"), padding=(6, 2))
 
-        root = ttk.Frame(self, padding=10)
-        root.pack(fill="both", expand=True, pady=(PAGE_TOP_OFFSET, 0))
-        root.columnconfigure(0, weight=1)
-        root.columnconfigure(1, weight=1)
+        root = ttk.Frame(self, padding=16)
+        root.pack(fill="both", expand=True)
+        root.columnconfigure(0, weight=7)
+        root.columnconfigure(1, weight=5)
         root.rowconfigure(1, weight=1)
 
-        ttk.Label(root, text="無人商店 AI 自助結帳系統", style="Title.TLabel").grid(
-            row=0, column=0, columnspan=2, sticky="w", pady=(0, 8)
+        ttk.Label(root, text="自助結帳系統", style="Title.TLabel").grid(
+            row=0, column=0, columnspan=2, sticky="w", pady=(0, 12)
         )
 
-        member_box = ttk.LabelFrame(root, text="會員資訊", padding=8, style="Section.TLabelframe")
+        member_box = ttk.LabelFrame(root, text="會員資訊", padding=12, style="Section.TLabelframe")
         member_box.grid(row=1, column=0, sticky="nsew", padx=(0, 8))
         member_box.columnconfigure(1, weight=1)
 
@@ -78,67 +75,54 @@ class UnmannedStoreApp(tk.Tk):
             ("狀態", self.status_var),
         ]
         for row, (label, variable) in enumerate(labels):
-            ttk.Label(member_box, text=f"{label}:").grid(row=row, column=0, sticky="nw", pady=3)
+            ttk.Label(member_box, text=f"{label}:").grid(row=row, column=0, sticky="nw", pady=5)
             ttk.Label(member_box, textvariable=variable, wraplength=330).grid(
-                row=row, column=1, sticky="w", pady=3
+                row=row, column=1, sticky="w", pady=5
             )
 
-        action_box = ttk.LabelFrame(member_box, text="購買", padding=8)
-        action_box.grid(row=5, column=0, columnspan=2, sticky="ew", pady=(10, 6))
+        action_box = ttk.LabelFrame(member_box, text="操作", padding=12)
+        action_box.grid(row=5, column=0, columnspan=2, sticky="ew", pady=(18, 8))
         for index in range(2):
             action_box.columnconfigure(index, weight=1)
-        ttk.Button(action_box, text="掃描會員", command=self.scan_member_flow).grid(
-            row=0, column=0, sticky="ew", padx=3, pady=4
+        ttk.Button(action_box, text="掃描會員", command=self.scan_member_flow, style="Action.TButton").grid(
+            row=0, column=0, sticky="ew", padx=4, pady=4
         )
-        ttk.Button(action_box, text="加入會員", command=self.open_register_window).grid(
-            row=0, column=1, sticky="ew", padx=3, pady=4
+        ttk.Button(action_box, text="加入會員", command=self.open_register_window, style="Action.TButton").grid(
+            row=0, column=1, sticky="ew", padx=4, pady=4
         )
-        ttk.Button(action_box, text="掃描商品", command=self.scan_item_flow).grid(
-            row=1, column=0, sticky="ew", padx=3, pady=4
+        ttk.Button(action_box, text="掃描商品", command=self.scan_item_flow, style="Action.TButton").grid(
+            row=1, column=0, sticky="ew", padx=4, pady=4
         )
-        ttk.Button(action_box, text="商品管理", command=self.open_product_manager).grid(
-            row=1, column=1, sticky="ew", padx=3, pady=4
+        ttk.Button(action_box, text="管理員操作", command=self.open_admin_panel, style="Action.TButton").grid(
+            row=1, column=1, sticky="ew", padx=4, pady=4
         )
-        ttk.Button(action_box, text="掃描完成 / 結帳", command=self.checkout_flow).grid(
-            row=2, column=0, sticky="ew", padx=3, pady=4
+        ttk.Button(action_box, text="掃描完成 / 結帳", command=self.checkout_flow, style="Action.TButton").grid(
+            row=2, column=0, columnspan=2, sticky="ew", padx=4, pady=(10, 4)
         )
-        ttk.Button(action_box, text="清空購物車", command=self.clear_cart).grid(
-            row=2, column=1, sticky="ew", padx=3, pady=4
-        )
-        for child in action_box.winfo_children():
-            if isinstance(child, ttk.Button):
-                child.configure(style="Action.TButton")
 
-        cart_box = ttk.LabelFrame(root, text="購物車", padding=6, style="Section.TLabelframe")
+        cart_box = ttk.LabelFrame(root, text="購物車", padding=12, style="Section.TLabelframe")
         cart_box.grid(row=1, column=1, sticky="nsew", padx=(8, 0))
-        cart_box.rowconfigure(0, weight=0)
+        cart_box.rowconfigure(0, weight=1)
         cart_box.columnconfigure(0, weight=1)
 
-        self.cart_list = tk.Listbox(cart_box, font=("Microsoft JhengHei UI", 10), height=CART_LIST_HEIGHT)
-        self.cart_list.grid(row=0, column=0, sticky="ew")
-        scrollbar = ttk.Scrollbar(cart_box, orient="vertical", command=self.cart_list.yview)
+        self.cart_canvas = tk.Canvas(cart_box, highlightthickness=0)
+        self.cart_canvas.grid(row=0, column=0, sticky="nsew")
+        scrollbar = ttk.Scrollbar(cart_box, orient="vertical", command=self.cart_canvas.yview)
         scrollbar.grid(row=0, column=1, sticky="ns")
-        self.cart_list.configure(yscrollcommand=scrollbar.set)
-        self.cart_list.bind("<<ListboxSelect>>", self.on_cart_select)
-        self.cart_list.bind("<Delete>", self.delete_selected_cart_item)
+        self.cart_canvas.configure(yscrollcommand=scrollbar.set)
 
-        cart_actions = ttk.Frame(cart_box)
-        cart_actions.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(4, 0))
-        cart_actions.columnconfigure(0, weight=1)
-        ttk.Button(cart_actions, text="刪除選取 ×", command=self.delete_selected_cart_item).grid(
-            row=0, column=0, sticky="ew"
-        )
-
-        ttk.Label(cart_box, textvariable=self.cart_selection_var, foreground="#555").grid(
-            row=2, column=0, columnspan=2, sticky="w", pady=(4, 0)
-        )
+        self.cart_items_frame = ttk.Frame(self.cart_canvas)
+        self.cart_window = self.cart_canvas.create_window((0, 0), window=self.cart_items_frame, anchor="nw")
+        self.cart_items_frame.columnconfigure(0, weight=1)
+        self.cart_items_frame.bind("<Configure>", self._sync_cart_scroll)
+        self.cart_canvas.bind("<Configure>", self._resize_cart_content)
 
         totals = ttk.Frame(cart_box)
-        totals.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(6, 0))
+        totals.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(12, 0))
         totals.columnconfigure(1, weight=1)
-        ttk.Label(totals, text="原價總金額:").grid(row=0, column=0, sticky="w", pady=1)
+        ttk.Label(totals, text="原價總金額:").grid(row=0, column=0, sticky="w", pady=4)
         ttk.Label(totals, textvariable=self.original_total_var).grid(row=0, column=1, sticky="e")
-        ttk.Label(totals, text="折扣後總金額:").grid(row=1, column=0, sticky="w", pady=1)
+        ttk.Label(totals, text="折扣後總金額:").grid(row=1, column=0, sticky="w", pady=4)
         ttk.Label(totals, textvariable=self.discounted_total_var).grid(row=1, column=1, sticky="e")
 
     def set_member(self, member: Member, status: str) -> None:
@@ -150,11 +134,46 @@ class UnmannedStoreApp(tk.Tk):
         self.refresh_cart()
 
     def refresh_cart(self) -> None:
-        self.cart_list.delete(0, tk.END)
-        for product in self.cart.items:
-            self.cart_list.insert(tk.END, f"{product.name}  ${product.price}")
+        for widget in self.cart_items_frame.winfo_children():
+            widget.destroy()
+
+        if not self.cart.items:
+            ttk.Label(self.cart_items_frame, text="購物車目前沒有商品", foreground="#666").grid(
+                row=0, column=0, sticky="w", padx=6, pady=8
+            )
+        else:
+            for index, product in enumerate(self.cart.items):
+                row = ttk.Frame(self.cart_items_frame, padding=(4, 2))
+                row.grid(row=index, column=0, sticky="ew", pady=2)
+                row.columnconfigure(0, weight=1)
+                row.columnconfigure(1, weight=0)
+                row.columnconfigure(2, weight=0)
+                ttk.Label(row, text=f"{product.name}").grid(row=0, column=0, sticky="w")
+
+                ttk.Label(row, text=f"${product.price}", anchor="e", width=8).grid(
+                    row=0, column=1, sticky="e", padx=(8, 10)
+                )
+                ttk.Button(
+                    row,
+                    text="刪除",
+                    command=lambda item_index=index: self.remove_cart_item(item_index),
+                    style="Danger.TButton",
+                ).grid(row=0, column=2, sticky="e")
+
+        self.cart_items_frame.update_idletasks()
+        self.cart_canvas.configure(scrollregion=self.cart_canvas.bbox("all"))
         self.original_total_var.set(f"{self.cart.original_total()} 元")
         self.discounted_total_var.set(f"{self.cart.discounted_total(self.current_member.discount)} 元")
+
+    def _sync_cart_scroll(self, _event=None) -> None:
+        self.cart_canvas.configure(scrollregion=self.cart_canvas.bbox("all"))
+
+    def _resize_cart_content(self, event) -> None:
+        self.cart_canvas.itemconfig(self.cart_window, width=event.width)
+
+    def remove_cart_item(self, index: int) -> None:
+        self.cart.remove_item(index)
+        self.refresh_cart()
 
     def scan_member_flow(self) -> None:
         result = scan_member()
@@ -171,21 +190,6 @@ class UnmannedStoreApp(tk.Tk):
     def open_register_window(self) -> None:
         MemberRegisterWindow(self, on_success=self.on_member_created)
 
-    def open_product_manager(self) -> None:
-        password = simpledialog.askstring("商品管理驗證", "請輸入商品管理密碼", show="*", parent=self)
-        if password is None:
-            return
-        if password != "1234":
-            messagebox.showerror("驗證失敗", "密碼錯誤，無法開啟商品管理。", parent=self)
-            return
-        if self.product_manager_window is not None and self.product_manager_window.winfo_exists():
-            self.product_manager_window.lift()
-            self.product_manager_window.focus_force()
-            return
-        self.product_manager_window = ProductManagerWindow(self)
-        self.product_manager_window.transient(self)
-        self.product_manager_window.focus_force()
-
     def on_member_created(self, member: Member) -> None:
         self.status_var.set("會員建立成功，請重新掃描會員")
         messagebox.showinfo("下一步", "會員建立成功，請重新掃描會員後再結帳套用折扣。")
@@ -193,6 +197,23 @@ class UnmannedStoreApp(tk.Tk):
     def scan_item_flow(self) -> None:
         result = scan_item()
         if not result.success:
+            if result.class_name:
+                candidate_product = get_product_by_class(result.class_name)
+                if candidate_product:
+                    confirmed = messagebox.askyesno(
+                        "商品辨識不確定",
+                        (
+                            f"{result.message}\n\n"
+                            f"候選商品: {candidate_product.name}\n"
+                            f"候選價格: {candidate_product.price} 元\n"
+                            f"候選信心度: {result.confidence:.2f}\n\n"
+                            "是否仍要加入購物車？"
+                        ),
+                    )
+                    if confirmed:
+                        self.cart.add_item(candidate_product)
+                        self.refresh_cart()
+                    return
             messagebox.showwarning("商品辨識失敗", result.message)
             return
 
@@ -200,7 +221,7 @@ class UnmannedStoreApp(tk.Tk):
         if not product:
             messagebox.showwarning(
                 "商品尚未建檔",
-                f"MediaPipe 回傳 class_name: {result.class_name}\n此商品尚未建檔。",
+                f"OpenCV 回傳 class_name: {result.class_name}\n此商品尚未建檔。",
             )
             return
 
@@ -216,40 +237,31 @@ class UnmannedStoreApp(tk.Tk):
         if not self.cart.items:
             messagebox.showwarning("購物車是空的", "請先加入商品再結帳。")
             return
-        messagebox.showinfo("結帳結果", self.cart.checkout_message(self.current_member))
-
-    def clear_cart(self) -> None:
+        checkout_text = "\n".join(
+            [
+                self.cart.checkout_message(self.current_member),
+                "",
+                "謝謝光臨，歡迎下次再來！",
+            ]
+        )
+        messagebox.showinfo("結帳結果", checkout_text)
         self.cart.clear()
         self.refresh_cart()
 
-    def on_cart_select(self, _event: tk.Event) -> None:
-        selection = self.cart_list.curselection()
-        if not selection:
-            self.cart_selection_var.set("選取商品後可按刪除 × 移除單項")
+    def open_admin_panel(self) -> None:
+        password = simpledialog.askstring("管理員驗證", "請輸入管理員密碼", show="*", parent=self)
+        if password is None:
             return
-        product = self.cart.items[selection[0]]
-        self.cart_selection_var.set(f"目前選取: {product.name}")
-
-    def delete_selected_cart_item(self, _event: tk.Event | None = None) -> None:
-        selection = self.cart_list.curselection()
-        if not selection:
-            messagebox.showwarning("尚未選取", "請先選擇要刪除的購物車商品。")
+        if password != "1234":
+            messagebox.showerror("驗證失敗", "密碼錯誤。")
             return
-
-        index = selection[0]
-        product = self.cart.items[index]
-        if not messagebox.askyesno("確認刪除", f"確定要從購物車移除 {product.name} 嗎？"):
-            return
-
-        del self.cart.items[index]
-        self.refresh_cart()
-        self.cart_selection_var.set("商品已移除")
+        AdminPanelWindow(self, on_data_changed=self.refresh_cart)
 
 
 def main() -> None:
     app = UnmannedStoreApp()
     if find_item_reference_root() is None:
-        app.status_var.set("尚未掃描會員；提醒: 找不到 src/item 商品參考照片")
+        app.status_var.set("尚未掃描會員；提醒: 找不到 src/item 商品參考照片，請先由管理員新增商品並拍攝參考照片")
     app.mainloop()
 
 

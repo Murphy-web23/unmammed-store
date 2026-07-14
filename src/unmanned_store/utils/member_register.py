@@ -5,6 +5,9 @@ import tkinter as tk
 from pathlib import Path
 from tkinter import messagebox, ttk
 
+import numpy as np
+from PIL import Image, ImageDraw, ImageFont
+
 from .member_manager import LEVEL_DISCOUNTS, add_member, next_general_face_folder
 
 
@@ -17,19 +20,45 @@ def _load_cv2():
         return None, f"OpenCV 載入失敗: {exc}"
 
 
+def _load_cjk_font(size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
+    font_candidates = [
+        Path("C:/Windows/Fonts/msjh.ttc"),
+        Path("C:/Windows/Fonts/msjhbd.ttc"),
+        Path("C:/Windows/Fonts/simsun.ttc"),
+        Path("/System/Library/Fonts/PingFang.ttc"),
+        Path("/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc"),
+    ]
+    for font_path in font_candidates:
+        if font_path.exists():
+            try:
+                return ImageFont.truetype(str(font_path), size=size)
+            except Exception:
+                continue
+    return ImageFont.load_default()
+
+
+def _draw_text(
+    cv2,
+    frame: np.ndarray,
+    text: str,
+    position: tuple[int, int],
+    color: tuple[int, int, int],
+    size: int,
+) -> np.ndarray:
+    # OpenCV putText 不支援中文，改用 Pillow 確保提示文字可正確顯示。
+    rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    image = Image.fromarray(rgb)
+    draw = ImageDraw.Draw(image)
+    font = _load_cjk_font(size)
+    draw.text(position, text, font=font, fill=(color[2], color[1], color[0]))
+    return cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
+
+
 def _show_completion(cv2, frame, text: str, duration: float = 1.2) -> None:
     start = time.time()
     while time.time() - start < duration:
         display = frame.copy()
-        cv2.putText(
-            display,
-            text,
-            (30, 110),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            1,
-            (0, 200, 255),
-            2,
-        )
+        display = _draw_text(cv2, display, text, (30, 85), (0, 200, 255), 36)
         cv2.imshow("加入會員拍照 - ESC 取消", display)
         if cv2.waitKey(1) & 0xFF == 27:
             break
@@ -51,32 +80,21 @@ def capture_member_photos(target_folder: Path, count: int = 3) -> tuple[bool, st
 
     try:
         for index in range(count):
-            for number in (5, 4, 3, 2, 1):
-                start = time.time()
-                while time.time() - start < 1:
-                    ok, frame = camera.read()
-                    if not ok:
-                        return False, "攝影機讀取失敗。"
-                    frame = cv2.flip(frame, 1)
-                    text = f"{prompts[index]}  {number}"
-                    cv2.putText(
-                        frame,
-                        text,
-                        (30, 60),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        1,
-                        (0, 255, 0),
-                        2,
-                    )
-                    cv2.imshow("加入會員拍照 - ESC 取消", frame)
-                    if cv2.waitKey(1) & 0xFF == 27:
-                        return False, "使用者取消拍照。"
-
-            ok, frame = camera.read()
-            if not ok:
-                return False, "攝影機讀取失敗。"
-            frame = cv2.flip(frame, 1)
-            cv2.imwrite(str(target_folder / f"{index + 1}.jpg"), frame)
+            while True:
+                ok, frame = camera.read()
+                if not ok:
+                    return False, "攝影機讀取失敗。"
+                frame = cv2.flip(frame, 1)
+                text = f"{prompts[index]}  SPACE拍照 ({index + 1}/{count})"
+                frame = _draw_text(cv2, frame, text, (30, 30), (0, 255, 0), 30)
+                frame = _draw_text(cv2, frame, "ESC 取消", (30, 70), (0, 255, 255), 28)
+                cv2.imshow("加入會員拍照 - ESC 取消", frame)
+                key = cv2.waitKey(1) & 0xFF
+                if key == 27:
+                    return False, "使用者取消拍照。"
+                if key == 32:
+                    cv2.imwrite(str(target_folder / f"{index + 1}.jpg"), frame)
+                    break
             _show_completion(cv2, frame, completed_prompts[index])
         return True, "會員照片拍攝完成。"
     except Exception as exc:
