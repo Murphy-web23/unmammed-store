@@ -2,3 +2,5 @@ opencv-python
 pillow
 pandas
 mediapipe
+ultralytics
+supervision

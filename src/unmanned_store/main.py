@@ -10,6 +10,7 @@ if __package__ is None or __package__ == "":
 
 from unmanned_store.utils.checkout import Cart
 from unmanned_store.utils.face_recognizer import scan_member
+from unmanned_store.utils.gift_detector import required_gift_for_total, scan_gift_camera
 from unmanned_store.utils.item_detector import find_item_reference_root, scan_item
 from unmanned_store.utils.admin_panel import AdminPanelWindow
 from unmanned_store.utils.member_manager import (
@@ -36,6 +37,8 @@ class UnmannedStoreApp(tk.Tk):
 
         self.current_member = Member.non_member()
         self.cart = Cart()
+        self.prompted_gift_kind: str | None = None
+        self.gift_message = "未領取滿額贈品"
         self.name_var = tk.StringVar()
         self.level_var = tk.StringVar()
         self.discount_var = tk.StringVar()
@@ -174,6 +177,61 @@ class UnmannedStoreApp(tk.Tk):
     def remove_cart_item(self, index: int) -> None:
         self.cart.remove_item(index)
         self.refresh_cart()
+        self._reset_gift_state_if_needed()
+
+    def _current_payable_total(self) -> int:
+        return self.cart.discounted_total(self.current_member.discount)
+
+    def _reset_gift_state_if_needed(self) -> None:
+        gift_rule = required_gift_for_total(self._current_payable_total())
+        if gift_rule is None:
+            self.prompted_gift_kind = None
+            self.gift_message = "未領取滿額贈品"
+        elif self.prompted_gift_kind and self.prompted_gift_kind != gift_rule.kind:
+            self.prompted_gift_kind = None
+            self.gift_message = "未領取滿額贈品"
+
+    def maybe_prompt_gift_flow(self) -> bool:
+        payable_total = self._current_payable_total()
+        gift_rule = required_gift_for_total(payable_total)
+        if gift_rule is None or self.prompted_gift_kind == gift_rule.kind:
+            return True
+
+        wants_gift = messagebox.askyesno(
+            "滿額贈品",
+            (
+                f"目前折扣後金額為 {payable_total} 元，符合滿額贈品資格。\n"
+                f"可領取贈品：{gift_rule.display_name}\n\n"
+                "是否需要領取贈品？"
+            ),
+        )
+        self.prompted_gift_kind = gift_rule.kind
+        if not wants_gift:
+            self.gift_message = f"已放棄滿額贈品：{gift_rule.display_name}"
+            return True
+
+        self.status_var.set(f"正在辨識贈品：{gift_rule.display_name}")
+        self.update_idletasks()
+        gift_result = scan_gift_camera(payable_total)
+        if not gift_result.success:
+            self.gift_message = "贈品辨識未通過，未領取贈品"
+            self.status_var.set(self.gift_message)
+            messagebox.showwarning(
+                "贈品辨識未通過",
+                (
+                    f"{gift_result.message}\n\n"
+                    "本次不兌換贈品。"
+                ),
+            )
+            return True
+
+        self.gift_message = (
+            f"已領取滿額贈品：{gift_rule.display_name}"
+            f"（YOLO: {gift_result.detected_class}, {gift_result.confidence:.2f}；"
+            f"茶 {gift_result.tea_confidence:.2f} / 牛奶 {gift_result.milk_confidence:.2f}）"
+        )
+        self.status_var.set(self.gift_message)
+        return True
 
     def scan_member_flow(self) -> None:
         result = scan_member()
@@ -237,6 +295,8 @@ class UnmannedStoreApp(tk.Tk):
         if not self.cart.items:
             messagebox.showwarning("購物車是空的", "請先加入商品再結帳。")
             return
+        payable_total = self._current_payable_total()
+        gift_rule = required_gift_for_total(payable_total)
         checkout_text = "\n".join(
             [
                 self.cart.checkout_message(self.current_member),
@@ -245,7 +305,11 @@ class UnmannedStoreApp(tk.Tk):
             ]
         )
         messagebox.showinfo("結帳結果", checkout_text)
+        if gift_rule:
+            self.maybe_prompt_gift_flow()
         self.cart.clear()
+        self.prompted_gift_kind = None
+        self.gift_message = "未領取滿額贈品"
         self.refresh_cart()
 
     def open_admin_panel(self) -> None:

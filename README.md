@@ -1,6 +1,6 @@
 # 無人商店 AI 自助結帳系統
 
-這是三人小組的 Python / OpenCV / MediaPipe 專題，目標是建立一套可展示、可維護、可擴充的無人商店自助結帳系統。系統目前已完成會員辨識、商品辨識、購物車、折扣結帳與管理員維護功能；後續預計加入 YOLO 鈔票辨識，讓結帳流程更接近完整自助收銀情境。
+這是三人小組的 Python / OpenCV / MediaPipe 專題，目標是建立一套可展示、可維護、可擴充的無人商店自助結帳系統。系統目前已完成會員辨識、商品辨識、購物車、折扣結帳、管理員維護，以及 YOLO 滿額贈品辨識展示流程；後續仍可擴充 YOLO 鈔票辨識，讓結帳流程更接近完整自助收銀情境。
 
 本 README 已整合目前程式狀態與 `report.txt` 的技術整理。
 
@@ -10,6 +10,7 @@
 - 非會員可選擇現場加入會員，或直接以原價結帳。
 - 商品可透過鏡頭掃描，系統以 OpenCV 多特徵比對加入購物車。
 - 系統依會員等級套用折扣並計算結帳金額。
+- 結帳後可依金額門檻啟動 YOLO 贈品辨識，展示茶與牛奶的信心值對比。
 - 管理員可維護會員與商品資料，新增商品時可拍攝參考照片。
 - 在辨識不確定時保留人工確認流程，降低 demo 中斷風險。
 
@@ -37,7 +38,19 @@
 - 顯示原價總金額與折扣後總金額。
 - 支援非會員、一般會員、學生會員、VIP 會員折扣。
 - 金額使用 `Decimal` 與 `ROUND_HALF_UP` 做一般四捨五入。
-- 結帳完成後清空購物車。
+- 按下「掃描完成 / 結帳」後會先顯示結帳結果。
+- 結帳完成提示關閉後，若折扣後金額達到滿額門檻，系統會詢問是否兌換贈品。
+- 贈品流程結束後清空購物車。
+
+### YOLO 滿額贈品流程
+
+- 折扣後金額滿 `100` 元，可兌換茶。
+- 折扣後金額滿 `150` 元，可兌換牛奶，並優先於滿 100 元贈品。
+- 使用者選擇兌換後，系統會啟動 YOLO 模型 `drinks.pt` 辨識贈品。
+- YOLO 視窗會即時顯示 Tea 與 Milk 的信心值與條狀對比。
+- 辨識到正確贈品後，畫面仍會持續即時更新，不會停在第一個偵測到的角落畫面。
+- 展示者可調整商品位置，確認大家都看到完整畫面後，按 `Enter` 或 `Space` 結束 YOLO 視窗。
+- 按 `Esc` 可取消或關閉 YOLO 辨識視窗。
 
 ### 管理員功能
 
@@ -57,6 +70,7 @@
 | 影像處理 | OpenCV |
 | 人臉辨識 | MediaPipe Face Landmark + 臉部外觀特徵向量 |
 | 商品辨識 | OpenCV 多特徵加權比對 |
+| 贈品辨識 | Ultralytics YOLO + `drinks.pt` |
 | 中文提示 | Pillow 繪製中文文字，避免 OpenCV 中文亂碼 |
 | 資料儲存 | CSV |
 | 檔案管理 | pathlib / dataclass |
@@ -178,10 +192,19 @@ src/unmanned_store/
     ├── admin_panel.py
     ├── checkout.py
     ├── face_recognizer.py
+    ├── gift_detector.py
     ├── item_detector.py
     ├── member_manager.py
     ├── member_register.py
     └── product_manager.py
+
+src/unmanned_store/yolo_gift_test.py
+
+model/
+└── drinks.pt
+
+tools/
+└── yolo_objectdetection_sv_2.py
 
 src/face/
 └── .gitkeep
@@ -223,6 +246,14 @@ opencv-python
 pillow
 pandas
 mediapipe
+ultralytics
+supervision
+```
+
+`model/drinks.pt` 為 YOLO 贈品辨識模型，因 `.gitignore` 已忽略 `model/`，不會直接上傳到 GitHub。若在新環境執行，需自行將模型放回：
+
+```text
+model/drinks.pt
 ```
 
 ## Demo 流程
@@ -265,6 +296,16 @@ mediapipe
 5. 按「新增商品」並拍攝多張參考照片。
 6. 系統建立商品資料與 `src/item/<class_name>/` 參考圖。
 
+### 流程 5：結帳後兌換滿額贈品
+
+1. 掃描所有商品並加入購物車。
+2. 按「掃描完成 / 結帳」。
+3. 系統先顯示結帳結果。
+4. 若折扣後金額滿 `100` 元，系統詢問是否兌換茶。
+5. 若折扣後金額滿 `150` 元，系統詢問是否兌換牛奶。
+6. 使用者選擇兌換後，YOLO 視窗會顯示茶與牛奶的即時信心值對比。
+7. 辨識到正確贈品後，畫面仍保持即時更新，展示者按 `Enter` 或 `Space` 後結束辨識。
+
 ## report.txt 重點整理
 
 `report.txt` 記錄了本專題從 MVP 到目前版本的演進：
@@ -272,6 +313,7 @@ mediapipe
 - 第一階段先完成可操作的 Tkinter 主流程。
 - 第二階段建立 MediaPipe Face Landmark 會員辨識。
 - 第三階段以 OpenCV 多特徵工程建立商品辨識。
+- 第四階段加入 YOLO 滿額贈品辨識，作為結帳後展示流程。
 - 針對光線與背景問題加入色彩平衡、HSV CLAHE 與前景 ROI。
 - 針對相似商品加入不確定結果處理，降低 demo 失敗率。
 - 針對雨傘與水壺加入 Canny 幾何規則。
@@ -304,23 +346,24 @@ src/banknote/
 └── data.yaml
 ```
 
-注意：目前 `requirements.txt` 尚未加入 YOLO 相關套件。等鈔票辨識正式開發時，可再評估加入 `ultralytics`，或依課程環境改用其他 YOLO 推論方式。
+注意：目前 `requirements.txt` 已因贈品辨識加入 `ultralytics` 與 `supervision`。若後續開發鈔票辨識，可沿用同一套 YOLO 推論環境，或依課程環境改用其他 YOLO 推論方式。
 
 ## 已知限制
 
 - OpenCV 商品辨識仍會受光線、角度、背景與鏡頭品質影響。
 - 顏色相近或外型相近的商品需要更多參考照片。
 - 目前商品辨識偏向 demo 與小型商品庫，不適合直接用於大型真實商店。
+- YOLO 贈品辨識模型目前針對茶與牛奶展示情境，需在模型可辨識的類別與光線條件下使用。
 - 會員照片屬個資，不建議上傳真實人臉資料到公開 GitHub。
 - YOLO 鈔票辨識仍屬後續規劃，尚未整合進目前主流程。
 
 ## 隱私與版本控制
 
 - `.gitignore` 已忽略 `src/face/*`，只保留 `src/face/.gitkeep`。
-- `.gitignore` 已忽略 `model/`，避免大型模型檔誤上傳。
+- `.gitignore` 已忽略 `model/`，避免 `drinks.pt` 等大型模型檔誤上傳。
 - `src/unmanned_store/temp/` 與拍攝暫存檔不會提交。
 - `.editorconfig` 與 `.gitattributes` 用於統一文字檔編碼與換行，降低 clone 後中文亂碼風險。
 
 ## 專題結論
 
-本專題目前已從「流程可跑」提升到「現場可展示、資料可維護、功能可擴充」的狀態。會員辨識使用 MediaPipe，商品辨識使用 OpenCV 多特徵加權與幾何規則，管理員功能可維護會員與商品資料。後續加入 YOLO 鈔票辨識後，系統會更接近完整的無人商店自助結帳流程。
+本專題目前已從「流程可跑」提升到「現場可展示、資料可維護、功能可擴充」的狀態。會員辨識使用 MediaPipe，商品辨識使用 OpenCV 多特徵加權與幾何規則，管理員功能可維護會員與商品資料；結帳後的 YOLO 贈品辨識則讓展示流程能呈現模型信心值對比。後續加入 YOLO 鈔票辨識後，系統會更接近完整的無人商店自助結帳流程。
